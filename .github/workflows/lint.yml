@@ -1,0 +1,25 @@
+name: lint
+
+on: [push, pull_request]
+
+permissions: read-all
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+    - name: 'Checkout'
+      uses: actions/checkout@v4
+    - name: 'Set up Python 3.14'
+      uses: actions/setup-python@v5
+      with:
+        python-version: 3.14
+    - name: 'Install ruff'
+      run: |
+        python3 --version
+        # Just install ruff to avoid heavy installation of
+        # project dependencies (ffmpeg, oneapi, torch)
+        python3 -m pip install ruff
+    - name: 'Test with ruff'
+      run: |
+        ruff check

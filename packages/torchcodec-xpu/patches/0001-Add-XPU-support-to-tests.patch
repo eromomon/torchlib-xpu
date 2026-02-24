@@ -1,0 +1,159 @@
+From 073c5d179a8f9ef93d2d613fd725e3cf289f7f74 Mon Sep 17 00:00:00 2001
+From: Edgar Romo Montiel <edgar.romo.montiel@intel.com>
+Date: Tue, 9 Dec 2025 14:36:08 -0800
+Subject: [PATCH] Add XPU support to tests
+
+Signed-off-by: Edgar Romo Montiel <edgar.romo.montiel@intel.com>
+---
+ test/conftest.py | 19 +++++++++++++++++--
+ test/test_ops.py | 14 ++++++++++++++
+ test/utils.py    | 18 ++++++++++++++++++
+ 3 files changed, 49 insertions(+), 2 deletions(-)
+
+diff --git a/test/conftest.py b/test/conftest.py
+index 0588f83..48d8700 100644
+--- a/test/conftest.py
++++ b/test/conftest.py
+@@ -15,6 +15,9 @@ def pytest_configure(config):
+     config.addinivalue_line(
+         "markers", "needs_ffmpeg_cli: mark for tests that rely on ffmpeg"
+     )
++    config.addinivalue_line(
++        "markers", "needs_xpu: mark for tests that rely on a XPU device"
++    )
+ 
+ 
+ def pytest_collection_modifyitems(items):
+@@ -24,8 +27,8 @@ def pytest_collection_modifyitems(items):
+ 
+     out_items = []
+     for item in items:
+-        # The needs_cuda mark will exist if the test was explicitly decorated
+-        # with the @needs_cuda decorator. It will also exist if it was
++        # The needs_[cuda|xpu] mark will exist if the test was explicitly decorated
++        # with the respective @needs_* decorator. It will also exist if it was
+         # parametrized with a parameter that has the mark: for example if a test
+         # is parametrized with
+         # @pytest.mark.parametrize('device', all_supported_devices())
+@@ -33,6 +36,7 @@ def pytest_collection_modifyitems(items):
+         # 'needs_cuda' mark, and the ones with device == 'cpu' won't have the
+         # mark.
+         needs_cuda = item.get_closest_marker("needs_cuda") is not None
++        needs_xpu = item.get_closest_marker("needs_xpu") is not None
+         needs_ffmpeg_cli = item.get_closest_marker("needs_ffmpeg_cli") is not None
+         has_skip_marker = item.get_closest_marker("skip") is not None
+ 
+@@ -68,6 +72,13 @@ def pytest_collection_modifyitems(items):
+             # those for whatever reason, we need to know.
+             item.add_marker(pytest.mark.skip(reason="CUDA not available."))
+ 
++        if (
++            needs_xpu
++            and not torch.xpu.is_available()
++            and os.environ.get("FAIL_WITHOUT_XPU") is None
++        ):
++            item.add_marker(pytest.mark.skip(reason="XPU not available."))
++
+         out_items.append(item)
+ 
+     items[:] = out_items
+@@ -82,6 +93,8 @@ def prevent_leaking_rng():
+     builtin_rng_state = random.getstate()
+     if torch.cuda.is_available():
+         cuda_rng_state = torch.cuda.get_rng_state()
++    if torch.xpu.is_available():
++        xpu_rng_state = torch.xpu.get_rng_state()
+ 
+     yield
+ 
+@@ -89,3 +102,5 @@ def prevent_leaking_rng():
+     random.setstate(builtin_rng_state)
+     if torch.cuda.is_available():
+         torch.cuda.set_rng_state(cuda_rng_state)
++    if torch.xpu.is_available():
++        torch.xpu.set_rng_state(xpu_rng_state)
+diff --git a/test/test_ops.py b/test/test_ops.py
+index 0ec4515..bd8d5db 100644
+--- a/test/test_ops.py
++++ b/test/test_ops.py
+@@ -47,6 +47,7 @@ from .utils import (
+     NASA_AUDIO_MP3,
+     NASA_VIDEO,
+     needs_cuda,
++    needs_xpu,
+     needs_ffmpeg_cli,
+     SINE_MONO_S32,
+     SINE_MONO_S32_44100,
+@@ -650,6 +651,19 @@ class TestVideoDecoderOps:
+             duration, torch.tensor(0.0334).double(), atol=0, rtol=1e-3
+         )
+ 
++    @needs_xpu
++    def test_xpu_decoder(self):
++        decoder = create_from_file(str(NASA_VIDEO.path))
++        add_video_stream(decoder, device="xpu")
++        frame0, pts, duration = get_next_frame(decoder)
++        assert frame0.device.type == "xpu"
++        reference_frame0 = NASA_VIDEO.get_frame_data_by_index(0)
++        assert_frames_equal(frame0, reference_frame0.to("xpu"))
++        assert pts == torch.tensor([0])
++        torch.testing.assert_close(
++            duration, torch.tensor(0.0334).double(), atol=0, rtol=1e-3
++        )
++
+ 
+ class TestAudioDecoderOps:
+     @pytest.mark.parametrize(
+diff --git a/test/utils.py b/test/utils.py
+index cd735cf..04e4eb1 100644
+--- a/test/utils.py
++++ b/test/utils.py
+@@ -13,6 +13,7 @@ import pytest
+ 
+ import torch
+ 
++import torchcodec_xpu
+ from torchcodec._core import get_ffmpeg_library_versions
+ from torchcodec.decoders import set_cuda_backend, VideoDecoder
+ from torchcodec.decoders._video_decoder import _read_custom_frame_mappings
+@@ -28,6 +29,13 @@ def needs_cuda(test_item):
+     return pytest.mark.needs_cuda(test_item)
+ 
+ 
++# Decorator for skipping XPU tests when XPU isn't available. The tests are
++# effectively marked to be skipped in pytest_collection_modifyitems() of
++# conftest.py
++def needs_xpu(test_item):
++    return pytest.mark.needs_xpu(test_item)
++
++
+ # Decorator for skipping ffmpeg tests when ffmpeg cli isn't available. The tests are
+ # effectively marked to be skipped in pytest_collection_modifyitems() of
+ # conftest.py
+@@ -50,6 +58,7 @@ def all_supported_devices():
+         "cpu",
+         pytest.param("cuda", marks=pytest.mark.needs_cuda),
+         pytest.param(_CUDA_BETA_DEVICE_STR, marks=pytest.mark.needs_cuda),
++        pytest.param("xpu", marks=pytest.mark.needs_xpu),
+     )
+ 
+ 
+@@ -156,6 +165,15 @@ def assert_frames_equal(*args, **kwargs):
+                 )
+             else:
+                 torch.testing.assert_close(*args, **kwargs, atol=atol, rtol=0)
++        elif args[0].device.type == "xpu":
++            if not torch.allclose(*args, atol=0, rtol=0):
++                from torcheval.metrics import PeakSignalNoiseRatio
++
++                metric = PeakSignalNoiseRatio()
++                metric.update(args[0], args[1])
++                mmm = metric.compute()
++                print(f">>> metric={mmm}")
++                assert mmm >= 40
+         else:
+             torch.testing.assert_close(*args, **kwargs, atol=0, rtol=0)
+     else:
+-- 
+2.48.1
+

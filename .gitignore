@@ -1,0 +1,5 @@
+*.so*
+**/__pycache__
+
+dist/
+src/torchcodec_xpu/version.py
