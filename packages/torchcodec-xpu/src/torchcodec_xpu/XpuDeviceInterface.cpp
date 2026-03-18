@@ -9,6 +9,11 @@
 #include <level_zero/ze_api.h>
 #include <va/va_drmcommon.h>
 
+#include <va/va.h>
+#include <va/va_drm.h>
+#include <fcntl.h>
+#include <vector>
+
 #include <ATen/DLConvertor.h>
 #include <c10/xpu/XPUStream.h>
 
@@ -73,6 +78,56 @@ bool has_fp64(const torch::Device& device) {
   return syclDevice.has(sycl::aspect::fp64);
 }
 
+// function to find Media Codec
+static bool probeVaapiMediaCodec(const std::string& renderD){
+  int fd = open(renderD.c_str(), O_RDWR);
+  if (fd < 0){
+    printf("ProbeVaapiMediaCodec: Failed to open render node");
+    return false;
+  }
+  
+  VADisplay dpy = vaGetDisplayDRM(fd);
+  if (!dpy){
+    close(fd);
+    printf("ProbeVaapiMediaCodec: Failed to get Display DRM from render node");
+    return false;
+  }
+
+  int major = 0, minor = 0;
+  VAStatus sts = vaInitialize(dpy, &major, &minor);
+  if (sts!= VA_STATUS_SUCCESS){
+    vaTerminate(dpy);
+    close(fd);
+    printf("ProbeVaapiMediaCodec: Failed to initialize VAAPI");
+    return false;
+  }
+
+  int maxEntrypoints = vaMaxNumEntrypoints(dpy);
+  std::vector<VAEntrypoint> entrypoints(maxEntrypoints);
+  int numEntrypoints = 0;
+  sts = vaQueryConfigEntrypoints(dpy, VAProfileH264Main, entrypoints.data(), &numEntrypoints);
+
+  
+  // Checks for H.264 media codec
+  bool hasMediaDecodec = false;
+  if (sts == VA_STATUS_SUCCESS) {
+    for (int i = 0 ; i < numEntrypoints; ++i) {
+      if (entrypoints[i] == VAEntrypointVLD){
+        hasMediaDecodec = true;
+        break;
+      }
+    }
+  }
+
+  vaTerminate(dpy);
+  close(fd);
+
+  printf("ProbeVaapiMediaCodec: VAAPI media decode has %s\n", hasMediaDecodec ? "been found" : "not been found");
+  return hasMediaDecodec;
+
+}
+
+
 UniqueAVBufferRef getVaapiContext(const torch::Device& device) {
   enum AVHWDeviceType type = av_hwdevice_find_type_by_name("vaapi");
   TORCH_CHECK(type != AV_HWDEVICE_TYPE_NONE, "Failed to find vaapi device");
@@ -128,6 +183,30 @@ XpuDeviceInterface::XpuDeviceInterface(const torch::Device& device)
   // This is a dummy tensor to initialize the xpu context.
   torch::Tensor dummyTensorForXpuInitialization = torch::empty(
       {1}, torch::TensorOptions().dtype(torch::kUInt8).device(device_));
+  
+  // Review codec properties 
+  has_fp64_ = has_fp64(device);
+  VLOG(1) << "Device supports FP64: " << has_fp64_;
+
+  int deviceIndex = getDeviceIndex(device_);
+  std::string renderD = "/dev/dri/renderD128";
+  sycl::device syclDevice = c10::xpu::get_raw_device(deviceIndex);
+  if (syclDevice.has(sycl::aspect::ext_intel_pci_address)){
+    auto BDF = syclDevice.get_info<sycl::ext::intel::info::device::pci_address>();
+    renderD = "/dev/dri/by-path/pci-" + BDF + "-render";
+  }
+  hasMediaDecodec_ = probeVaapiMediaCodec(renderD);
+
+  if (!hasMediaDecodec_){
+    LOG(WARNING)
+        <<" XPU at device " << renderD
+        << " does not support VAAPI media decode. "
+        << " Hardware video decoding unavailable, the framework will "
+        << " fall back to CPU";
+    return;
+  }
+
+  
   ctx_ = getVaapiContext(device_);
 
   if (use_sycl_color_conversion_kernel()) {
@@ -138,8 +217,7 @@ XpuDeviceInterface::XpuDeviceInterface(const torch::Device& device)
     VLOG(1) << "Backend: VAAPI_FILTER (Flexible, with scaling)";
   }
 
-  has_fp64_ = has_fp64(device);
-  VLOG(1) << "Device supports FP64: " << has_fp64_;
+  
 }
 
 XpuDeviceInterface::~XpuDeviceInterface() {

@@ -43,6 +43,8 @@ class XpuDeviceInterface : public DeviceInterface {
   AVRational timeBase_;
   bool has_fp64_;
 
+  bool hasMediaDecodec_ = false;
+
   UniqueAVBufferRef ctx_;
 
   std::unique_ptr<FilterGraph> filterGraphContext_;
