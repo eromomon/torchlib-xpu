@@ -203,6 +203,7 @@ XpuDeviceInterface::XpuDeviceInterface(const torch::Device& device)
         << " does not support VAAPI media decode. "
         << " Hardware video decoding unavailable, the framework will "
         << " fall back to CPU";
+    cpuFallback_ = std::make_unique<CpuDeviceInterface>(torch::Device(torch::kCPU));
     return;
   }
 
@@ -231,6 +232,13 @@ void XpuDeviceInterface::initialize(
     [[maybe_unused]] const UniqueDecodingAVFormatContext& avFormatCtx,
     [[maybe_unused]] const SharedAVCodecContext& codecContext) {
   TORCH_CHECK(avStream != nullptr, "avStream is null");
+  // to implement CPU fallback
+  if (cpuFallback_) {
+    codecContext_ = codecContext;
+    timeBase_ = avStream->time_base;
+    cpuFallback_->initialize(avStream, avFormatCtx, codecContext);
+    return;
+  }
   codecContext_ = codecContext;
   timeBase_ = avStream->time_base;
 }
@@ -239,11 +247,20 @@ void XpuDeviceInterface::initializeVideo(
     const VideoStreamOptions& videoStreamOptions,
     [[maybe_unused]] const std::vector<std::unique_ptr<Transform>>& transforms,
     [[maybe_unused]] const std::optional<FrameDims>& resizedOutputDims) {
+  if (cpuFallback_) {
+    cpuFallback_->initializeVideo(videoStreamOptions, transforms, resizedOutputDims);
+    return;
+  }
   videoStreamOptions_ = videoStreamOptions;
 }
 
 void XpuDeviceInterface::registerHardwareDeviceWithCodec(
     AVCodecContext* codecContext) {
+  // To implement CPU fallback
+  if(!hasMediaDecodec_) {
+     return;
+  }
+
   TORCH_CHECK(ctx_, "FFmpeg HW device has not been initialized");
   TORCH_CHECK(codecContext != nullptr, "codecContext is null");
   codecContext->hw_device_ctx = av_buffer_ref(ctx_.get());
@@ -377,6 +394,16 @@ void XpuDeviceInterface::convertAVFrameToFrameOutput(
     std::optional<torch::Tensor> preAllocatedOutputTensor) {
   // TODO: consider to copy handling of CPU frame from CUDA
   // TODO: consider to copy NV12 format check from CUDA
+  // To implement CPU fallback
+  if (cpuFallback_) {
+    cpuFallback_->convertAVFrameToFrameOutput(avFrame, frameOutput, std::nullopt);
+    if (preAllocatedOutputTensor.has_value()){
+      preAllocatedOutputTensor.value().copy_(frameOutput.data);
+      frameOutput.data = preAllocatedOutputTensor.value();
+    }
+    return;
+  }
+
   TORCH_CHECK(
       avFrame->format == AV_PIX_FMT_VAAPI,
       "Expected format to be AV_PIX_FMT_VAAPI, got " +
@@ -546,6 +573,10 @@ bool XpuDeviceInterface::convertAVFrameToFrameOutput_SYCL(
 std::optional<const AVCodec*> XpuDeviceInterface::findCodec(
     const AVCodecID& codecId,
     bool isDecoder) {
+
+  if (!hasMediaDecodec_){
+    return std::nullopt;
+  }
   void* i = nullptr;
   const AVCodec* codec = nullptr;
   while ((codec = av_codec_iterate(&i)) != nullptr) {
