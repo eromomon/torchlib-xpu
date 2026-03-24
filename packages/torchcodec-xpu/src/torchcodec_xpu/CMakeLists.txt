@@ -32,7 +32,7 @@ endif()
 find_package(PkgConfig REQUIRED)
 pkg_check_modules(L0 REQUIRED IMPORTED_TARGET level-zero)
 pkg_check_modules(LIBVA REQUIRED IMPORTED_TARGET libva)
-pkg_check_modules(LIBVA_DRM REQUIRED IMPORTED_TARGET libva-drm)
+#pkg_check_modules(LIBVA_DRM REQUIRED IMPORTED_TARGET libva-drm)
 
 if (NOT "$ENV{TORCH_XPU_ARCH_LIST}" STREQUAL "")
     set(TORCH_XPU_ARCH_LIST "$ENV{TORCH_XPU_ARCH_LIST}")
@@ -89,7 +89,7 @@ function(make_torchcodec_xpu_libraries torchcodec_variant)
       torchcodec::ffmpeg${torchcodec_variant}
       PkgConfig::LIBVA
       PkgConfig::L0
-      PkgConfig::LIBVA_DRM
+    #  PkgConfig::LIBVA_DRM
     )
 
     if(WITH_SYCL_KERNELS)
