@@ -180,15 +180,5 @@ void convertNV12ToRGB(
   queue.wait();
 }
 
-// // This function is called during library initialization to ensure
-// // the SYCL runtime registers the kernel associated with this type.
-// void registerColorConversionKernel() {
-//   // Creating a dummy pointer to the kernel type is often enough
-//   // to force the compiler to emit the necessary RTTI/integration info.
-//   // We use volatile to prevent optimization.
-//   volatile size_t s = sizeof(NV12toRGBKernel);
-//   (void)s;
-// }
-
 } // namespace facebook::torchcodec
 #endif // WITH_SYCL_KERNELS

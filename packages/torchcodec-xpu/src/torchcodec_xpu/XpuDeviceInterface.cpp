@@ -11,7 +11,6 @@
 
 #include <va/va.h>
 #include <va/va_drm.h>
-// #include <fcntl.h>
 #include <vector>
 
 #include <ATen/DLConvertor.h>
@@ -23,8 +22,6 @@
 #include "XpuDeviceInterface.h"
 
 extern "C" {
-// #include <libavfilter/buffersink.h>
-// #include <libavfilter/buffersrc.h>
 #include <libavutil/hwcontext_vaapi.h>
 #include <libavutil/pixdesc.h>
 }
@@ -154,7 +151,7 @@ XpuDeviceInterface::XpuDeviceInterface(const torch::Device& device)
   torch::Tensor dummyTensorForXpuInitialization = torch::empty(
       {1}, torch::TensorOptions().dtype(torch::kUInt8).device(device_));
   
-  // Review codec properties 
+  //  Check device FP64 capability 
   has_fp64_ = has_fp64(device);
   VLOG(1) << "Device supports FP64: " << has_fp64_;
 
@@ -249,7 +246,6 @@ void deleter(DLManagedTensor* self) {
   std::unique_ptr<xpuManagerCtx> context((xpuManagerCtx*)self->manager_ctx);
   zeMemFree(context->zeCtx, self->dl_tensor.data);
   free(self->dl_tensor.shape);
-//   free(self->dl_tensor.strides);
 }
 
 torch::Tensor AVFrameToTensor(
@@ -346,13 +342,6 @@ torch::Tensor AVFrameToTensor(
 
   return dst;
 }
-
-// VADisplay getVaDisplayFromAV(UniqueAVFrame& avFrame) {
-//   AVHWFramesContext* hwfc = (AVHWFramesContext*)avFrame->hw_frames_ctx->data;
-//   AVHWDeviceContext* hwdc = hwfc->device_ctx;
-//   AVVAAPIDeviceContext* vactx = (AVVAAPIDeviceContext*)hwdc->hwctx;
-//   return vactx->display;
-// }
 
 void XpuDeviceInterface::convertAVFrameToFrameOutput(
     UniqueAVFrame& avFrame,
@@ -540,7 +529,6 @@ bool XpuDeviceInterface::convertAVFrameToFrameOutput_SYCL(
       frame->height,
       desc.layers[0].pitch[0],
       false);
-
   zeMemFree(context->zeCtx, usm_ptr);
   converted = true;
 #endif
@@ -549,7 +537,7 @@ bool XpuDeviceInterface::convertAVFrameToFrameOutput_SYCL(
 
 // inspired by https://github.com/FFmpeg/FFmpeg/commit/ad67ea9
 // we have to do this because of an FFmpeg bug where hardware decoding is not
-// appropriately set, so we just go off and find the matching codec for the CUDA
+// appropriately set, so we just go off and find the matching codec for the XPU
 // device
 std::optional<const AVCodec*> XpuDeviceInterface::findCodec(
     const AVCodecID& codecId,
