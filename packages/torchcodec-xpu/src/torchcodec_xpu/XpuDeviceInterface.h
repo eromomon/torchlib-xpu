@@ -44,7 +44,9 @@ class XpuDeviceInterface : public DeviceInterface {
   AVRational timeBase_;
   bool has_fp64_;
 
-  bool hasMediaDecodec_ = false;
+  std::string renderD_;
+  
+  bool hwDecodeActiveForCurrentStream_ = false;
 
   UniqueAVBufferRef ctx_;
 

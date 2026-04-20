@@ -11,7 +11,7 @@
 
 #include <va/va.h>
 #include <va/va_drm.h>
-#include <fcntl.h>
+// #include <fcntl.h>
 #include <vector>
 
 #include <ATen/DLConvertor.h>
@@ -23,8 +23,8 @@
 #include "XpuDeviceInterface.h"
 
 extern "C" {
-#include <libavfilter/buffersink.h>
-#include <libavfilter/buffersrc.h>
+// #include <libavfilter/buffersink.h>
+// #include <libavfilter/buffersrc.h>
 #include <libavutil/hwcontext_vaapi.h>
 #include <libavutil/pixdesc.h>
 }
@@ -73,87 +73,57 @@ inline bool use_sycl_color_conversion_kernel() {
 }
 
 bool has_fp64(const torch::Device& device) {
-  int deviceIndex = getDeviceIndex(device);
-  sycl::device syclDevice = c10::xpu::get_raw_device(deviceIndex);
-  return syclDevice.has(sycl::aspect::fp64);
+ int deviceIndex = getDeviceIndex(device);
+ sycl::device syclDevice = c10::xpu::get_raw_device(deviceIndex);
+ return syclDevice.has(sycl::aspect::fp64);
 }
 
-// function to find Media Codec
-static bool probeVaapiMediaCodec(const std::string& renderD){
-  int fd = open(renderD.c_str(), O_RDWR);
-  if (fd < 0){
-    printf("ProbeVaapiMediaCodec: Failed to open render node");
-    return false;
-  }
-  
-  VADisplay dpy = vaGetDisplayDRM(fd);
-  if (!dpy){
-    close(fd);
-    printf("ProbeVaapiMediaCodec: Failed to get Display DRM from render node");
-    return false;
-  }
 
-  int major = 0, minor = 0;
-  VAStatus sts = vaInitialize(dpy, &major, &minor);
-  if (sts!= VA_STATUS_SUCCESS){
-    vaTerminate(dpy);
-    close(fd);
-    printf("ProbeVaapiMediaCodec: Failed to initialize VAAPI");
-    return false;
-  }
+// Returns true if FFmpeg was built with VAAPI HW decode support for this codec.
+// Physical device capability is validated lazily at the first decoded frame
+// via the SW-fallback detection in convertAVFrameToFrameOutput.
+// hw_device_ctx is intentionally unused here; the check is pure FFmpeg metadata.
+bool deviceSupportsHWDecode(
+    AVBufferRef* /*hw_device_ctx*/,
+    AVCodecID codec_id) {
+  const AVCodec* decoder = avcodec_find_decoder(codec_id);
+  if (!decoder) return false;
 
-  int maxEntrypoints = vaMaxNumEntrypoints(dpy);
-  std::vector<VAEntrypoint> entrypoints(maxEntrypoints);
-  int numEntrypoints = 0;
-  sts = vaQueryConfigEntrypoints(dpy, VAProfileH264Main, entrypoints.data(), &numEntrypoints);
-
-  
-  // Checks for H.264 media codec
-  bool hasMediaDecodec = false;
-  if (sts == VA_STATUS_SUCCESS) {
-    for (int i = 0 ; i < numEntrypoints; ++i) {
-      if (entrypoints[i] == VAEntrypointVLD){
-        hasMediaDecodec = true;
-        break;
-      }
+  for (int i = 0; ; ++i) {
+    const AVCodecHWConfig* cfg = avcodec_get_hw_config(decoder, i);
+    if (!cfg) break;
+    if ((cfg->methods & AV_CODEC_HW_CONFIG_METHOD_HW_DEVICE_CTX) &&
+         cfg->device_type == AV_HWDEVICE_TYPE_VAAPI) {
+      return true;
     }
   }
-
-  vaTerminate(dpy);
-  close(fd);
-
-  printf("ProbeVaapiMediaCodec: VAAPI media decode has %s\n", hasMediaDecodec ? "been found" : "not been found");
-  return hasMediaDecodec;
-
+  return false;
 }
 
 
-UniqueAVBufferRef getVaapiContext(const torch::Device& device) {
+// Returns a null UniqueAVBufferRef (without throwing) if VAAPI is unavailable,
+// allowing per-codec SW fallback instead of a hard failure.
+UniqueAVBufferRef getVaapiContext(
+    const torch::Device& device,
+    const std::string& renderD) {
   enum AVHWDeviceType type = av_hwdevice_find_type_by_name("vaapi");
-  TORCH_CHECK(type != AV_HWDEVICE_TYPE_NONE, "Failed to find vaapi device");
-  int deviceIndex = getDeviceIndex(device);
+  if (type == AV_HWDEVICE_TYPE_NONE) {
+    LOG(WARNING) << "VAAPI hwdevice type not found in this FFmpeg build.";
+    return UniqueAVBufferRef(nullptr);
+  }
 
   UniqueAVBufferRef hw_device_ctx = g_cached_hw_device_ctxs.get(device);
   if (hw_device_ctx) {
     return hw_device_ctx;
   }
 
-  std::string renderD = "/dev/dri/renderD128";
-
-  sycl::device syclDevice = c10::xpu::get_raw_device(deviceIndex);
-  if (syclDevice.has(sycl::aspect::ext_intel_pci_address)) {
-    auto BDF =
-        syclDevice.get_info<sycl::ext::intel::info::device::pci_address>();
-    renderD = "/dev/dri/by-path/pci-" + BDF + "-render";
-  }
-
   AVBufferRef* ctx = nullptr;
   int err = av_hwdevice_ctx_create(&ctx, type, renderD.c_str(), nullptr, 0);
   if (err < 0) {
-    TORCH_CHECK(
-        false,
-        "Failed to create specified HW device: ",
-        getFFMPEGErrorStringFromErrorCode(err));
+    LOG(WARNING) << "Failed to create VAAPI device context on " << renderD
+                 << ": " << getFFMPEGErrorStringFromErrorCode(err)
+                 << "; all codecs will fall back to CPU.";
+    return UniqueAVBufferRef(nullptr);
   }
   return UniqueAVBufferRef(ctx);
 }
@@ -189,26 +159,24 @@ XpuDeviceInterface::XpuDeviceInterface(const torch::Device& device)
   VLOG(1) << "Device supports FP64: " << has_fp64_;
 
   int deviceIndex = getDeviceIndex(device_);
-  std::string renderD = "/dev/dri/renderD128";
+  renderD_ = "/dev/dri/renderD128";
   sycl::device syclDevice = c10::xpu::get_raw_device(deviceIndex);
-  if (syclDevice.has(sycl::aspect::ext_intel_pci_address)){
+  if (syclDevice.has(sycl::aspect::ext_intel_pci_address)) {
     auto BDF = syclDevice.get_info<sycl::ext::intel::info::device::pci_address>();
-    renderD = "/dev/dri/by-path/pci-" + BDF + "-render";
-  }
-  hasMediaDecodec_ = probeVaapiMediaCodec(renderD);
-
-  if (!hasMediaDecodec_){
-    LOG(WARNING)
-        <<" XPU at device " << renderD
-        << " does not support VAAPI media decode. "
-        << " Hardware video decoding unavailable, the framework will "
-        << " fall back to CPU";
-    cpuFallback_ = std::make_unique<CpuDeviceInterface>(torch::Device(torch::kCPU));
-    return;
+    renderD_ = "/dev/dri/by-path/pci-" + BDF + "-render";
   }
 
-  
-  ctx_ = getVaapiContext(device_);
+  // Attempt to create the VAAPI device context. If this fails, ctx_ remains
+  // null and registerHardwareDeviceWithCodec will route every codec to CPU.
+  ctx_ = getVaapiContext(device_, renderD_);
+  if (!ctx_) {
+    VLOG(1) << "No VAAPI device context available on " << renderD_
+            << "; all streams will use SW decode via CPU fallback.";
+  }
+
+  // Always create the CPU fallback interface. It is activated per-stream by
+  // registerHardwareDeviceWithCodec when a codec lacks HW decode support.
+  cpuFallback_ = std::make_unique<CpuDeviceInterface>(torch::Device(torch::kCPU));
 
   if (use_sycl_color_conversion_kernel()) {
     VLOG(1) << "XpuDeviceInterface initialized with SYCL kernel backend";
@@ -217,8 +185,6 @@ XpuDeviceInterface::XpuDeviceInterface(const torch::Device& device)
     VLOG(1) << "XpuDeviceInterface initialized with VAAPI filter graph backend";
     VLOG(1) << "Backend: VAAPI_FILTER (Flexible, with scaling)";
   }
-
-  
 }
 
 XpuDeviceInterface::~XpuDeviceInterface() {
@@ -229,42 +195,42 @@ XpuDeviceInterface::~XpuDeviceInterface() {
 
 void XpuDeviceInterface::initialize(
     const AVStream* avStream,
-    [[maybe_unused]] const UniqueDecodingAVFormatContext& avFormatCtx,
-    [[maybe_unused]] const SharedAVCodecContext& codecContext) {
+    const UniqueDecodingAVFormatContext& avFormatCtx,
+    const SharedAVCodecContext& codecContext) {
   TORCH_CHECK(avStream != nullptr, "avStream is null");
-  // to implement CPU fallback
-  if (cpuFallback_) {
-    codecContext_ = codecContext;
-    timeBase_ = avStream->time_base;
-    cpuFallback_->initialize(avStream, avFormatCtx, codecContext);
-    return;
-  }
   codecContext_ = codecContext;
   timeBase_ = avStream->time_base;
+  // Always prepare the CPU fallback; registerHardwareDeviceWithCodec will
+  // determine per-codec whether the HW or SW path is used.
+  cpuFallback_->initialize(avStream, avFormatCtx, codecContext);
 }
 
 void XpuDeviceInterface::initializeVideo(
     const VideoStreamOptions& videoStreamOptions,
     [[maybe_unused]] const std::vector<std::unique_ptr<Transform>>& transforms,
     [[maybe_unused]] const std::optional<FrameDims>& resizedOutputDims) {
-  if (cpuFallback_) {
-    cpuFallback_->initializeVideo(videoStreamOptions, transforms, resizedOutputDims);
-    return;
-  }
   videoStreamOptions_ = videoStreamOptions;
+  cpuFallback_->initializeVideo(videoStreamOptions, transforms, resizedOutputDims);
 }
 
 void XpuDeviceInterface::registerHardwareDeviceWithCodec(
     AVCodecContext* codecContext) {
   // To implement CPU fallback
-  if(!hasMediaDecodec_) {
-     return;
-  }
+  TORCH_CHECK(codecContext != nullptr, "codecContext is null")
+  if(!ctx_ || !deviceSupportsHWDecode(ctx_.get(), codecContext->codec_id)) {
+    
+    LOG(WARNING) << "No VAAPI HW decode for codec"
+                 << avcodec_get_name(codecContext->codec_id)
+                 << "on device " << renderD_
+                 << "; falling back to CPU for this stream";
+    hwDecodeActiveForCurrentStream_ = false;
+    return;
 
-  TORCH_CHECK(ctx_, "FFmpeg HW device has not been initialized");
-  TORCH_CHECK(codecContext != nullptr, "codecContext is null");
+  }
+  hwDecodeActiveForCurrentStream_ = true;
   codecContext->hw_device_ctx = av_buffer_ref(ctx_.get());
 }
+
 
 VADisplay getVaDisplayFromAV(AVFrame* avFrame) {
   AVHWFramesContext* hwfc = (AVHWFramesContext*)avFrame->hw_frames_ctx->data;
@@ -283,7 +249,7 @@ void deleter(DLManagedTensor* self) {
   std::unique_ptr<xpuManagerCtx> context((xpuManagerCtx*)self->manager_ctx);
   zeMemFree(context->zeCtx, self->dl_tensor.data);
   free(self->dl_tensor.shape);
-  free(self->dl_tensor.strides);
+//   free(self->dl_tensor.strides);
 }
 
 torch::Tensor AVFrameToTensor(
@@ -381,12 +347,12 @@ torch::Tensor AVFrameToTensor(
   return dst;
 }
 
-VADisplay getVaDisplayFromAV(UniqueAVFrame& avFrame) {
-  AVHWFramesContext* hwfc = (AVHWFramesContext*)avFrame->hw_frames_ctx->data;
-  AVHWDeviceContext* hwdc = hwfc->device_ctx;
-  AVVAAPIDeviceContext* vactx = (AVVAAPIDeviceContext*)hwdc->hwctx;
-  return vactx->display;
-}
+// VADisplay getVaDisplayFromAV(UniqueAVFrame& avFrame) {
+//   AVHWFramesContext* hwfc = (AVHWFramesContext*)avFrame->hw_frames_ctx->data;
+//   AVHWDeviceContext* hwdc = hwfc->device_ctx;
+//   AVVAAPIDeviceContext* vactx = (AVVAAPIDeviceContext*)hwdc->hwctx;
+//   return vactx->display;
+// }
 
 void XpuDeviceInterface::convertAVFrameToFrameOutput(
     UniqueAVFrame& avFrame,
@@ -394,10 +360,25 @@ void XpuDeviceInterface::convertAVFrameToFrameOutput(
     std::optional<torch::Tensor> preAllocatedOutputTensor) {
   // TODO: consider to copy handling of CPU frame from CUDA
   // TODO: consider to copy NV12 format check from CUDA
-  // To implement CPU fallback
-  if (cpuFallback_) {
+
+  // Detect silent SW fallback: HW path was requested but FFmpeg produced a SW
+  // frame. This happens on devices without video decode engines (e.g. PVC),
+  // where av_hwdevice_ctx_create succeeds but the hardware has no media blocks,
+  // so FFmpeg silently falls back to software decode on the first packet.
+  if (hwDecodeActiveForCurrentStream_ && avFrame->format != AV_PIX_FMT_VAAPI) {
+    LOG(WARNING) << "Expected VAAPI frame but got SW format "
+                 << av_get_pix_fmt_name((AVPixelFormat)avFrame->format)
+                 << " on device " << renderD_
+                 << "; device has no HW decode engine for this codec."
+                 << " Switching stream to CPU path.";
+    hwDecodeActiveForCurrentStream_ = false;
+  }
+
+  if (!hwDecodeActiveForCurrentStream_) {
+    // This stream's codec has no VAAPI HW decode support; the frame is in a
+    // SW pixel format. Delegate conversion to the CPU device interface.
     cpuFallback_->convertAVFrameToFrameOutput(avFrame, frameOutput, std::nullopt);
-    if (preAllocatedOutputTensor.has_value()){
+    if (preAllocatedOutputTensor.has_value()) {
       preAllocatedOutputTensor.value().copy_(frameOutput.data);
       frameOutput.data = preAllocatedOutputTensor.value();
     }
@@ -574,7 +555,7 @@ std::optional<const AVCodec*> XpuDeviceInterface::findCodec(
     const AVCodecID& codecId,
     bool isDecoder) {
 
-  if (!hasMediaDecodec_){
+  if (!ctx_) {
     return std::nullopt;
   }
   void* i = nullptr;
