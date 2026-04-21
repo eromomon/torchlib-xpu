@@ -11,7 +11,7 @@ namespace facebook::torchcodec {
 
 class XpuDeviceInterface : public DeviceInterface {
  public:
-  XpuDeviceInterface(const torch::Device& device);
+  XpuDeviceInterface(const StableDevice& device);
 
   virtual ~XpuDeviceInterface();
 
@@ -36,7 +36,7 @@ class XpuDeviceInterface : public DeviceInterface {
   void convertAVFrameToFrameOutput(
       UniqueAVFrame& avFrame,
       FrameOutput& frameOutput,
-      std::optional<torch::Tensor> preAllocatedOutputTensor =
+      std::optional<torch::stable::Tensor> preAllocatedOutputTensor =
           std::nullopt) override;
 
  private:
@@ -50,24 +50,25 @@ class XpuDeviceInterface : public DeviceInterface {
 
   UniqueAVBufferRef ctx_;
 
-  std::unique_ptr<FilterGraph> filterGraphContext_;
+  std::unique_ptr<FilterGraph> filterGraph_;
 
   // Used to know whether a new FilterGraphContext should
   // be created before decoding a new frame.
-  FiltersContext prevFiltersContext_;
+  FiltersConfig prevFiltersConfig_;
 
   // Optimized conversion. Return value indicates if conversion was
   // successfull.
   bool convertAVFrameToFrameOutput_SYCL(
       UniqueAVFrame& avFrame,
-      torch::Tensor& dst);
+      torch::stable::Tensor& dst);
   // Fallback conversion if optimized path is not available.
   void convertAVFrameToFrameOutput_FilterGraph(
       UniqueAVFrame& avFrame,
-      torch::Tensor& dst);
+      torch::stable::Tensor& dst);
 
   // To implment Cpu fallback
   std::unique_ptr<CpuDeviceInterface> cpuFallback_;
+      
 };
 
 } // namespace facebook::torchcodec

@@ -1,3 +1,5 @@
+[![OpenSSF Scorecard](https://api.securityscorecards.dev/projects/github.com/intel/torchlib-xpu/badge)](https://scorecard.dev/viewer/?uri=github.com/intel/torchlib-xpu)
+
 # Intel® XPU Library for PyTorch* Ecosystem Projects
 
 This project contains a set of plugins for PyTorch* ecosystem libraries which enable hardware acceleration on Intel® GPUs thru the `xpu` PyTorch* device backend. The goal of the project is to:
@@ -69,7 +71,7 @@ export LD_LIBRARY_PATH=$HOME/_install/lib:$LD_LIBRARY_PATH
 ```
 git clone https://github.com/intel/torchlib-xpu.git && cd torchlib-xpu
 
-uv venv && uv pip install torch~=2.10.0 -e . \
+uv venv && uv pip install torch~=2.11.0 -e . \
   --index https://download.pytorch.org/whl/xpu -vv
 ```
 
