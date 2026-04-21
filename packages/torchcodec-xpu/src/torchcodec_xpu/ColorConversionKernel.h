@@ -19,9 +19,6 @@ void convertNV12ToRGB(
     int stride,
     bool fullrange = 1);
 
-// Anchor function to force kernel registration
-void registerColorConversionKernel();
-
 } // namespace facebook::torchcodec
 
 #endif // WITH_SYCL_KERNELS

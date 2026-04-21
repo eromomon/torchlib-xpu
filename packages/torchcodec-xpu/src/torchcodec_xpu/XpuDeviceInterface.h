@@ -4,6 +4,7 @@
 #pragma once
 
 #include "DeviceInterface.h"
+#include "CpuDeviceInterface.h"
 #include "FilterGraph.h"
 
 namespace facebook::torchcodec {
@@ -43,6 +44,10 @@ class XpuDeviceInterface : public DeviceInterface {
   AVRational timeBase_;
   bool has_fp64_;
 
+  std::string renderD_;
+  
+  bool hwDecodeActiveForCurrentStream_ = false;
+
   UniqueAVBufferRef ctx_;
 
   std::unique_ptr<FilterGraph> filterGraph_;
@@ -60,6 +65,10 @@ class XpuDeviceInterface : public DeviceInterface {
   void convertAVFrameToFrameOutput_FilterGraph(
       UniqueAVFrame& avFrame,
       torch::stable::Tensor& dst);
+
+  // To implment Cpu fallback
+  std::unique_ptr<CpuDeviceInterface> cpuFallback_;
+      
 };
 
 } // namespace facebook::torchcodec
