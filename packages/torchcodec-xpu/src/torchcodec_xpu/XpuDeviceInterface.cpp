@@ -22,6 +22,7 @@ extern "C" {
 #include <libavfilter/buffersrc.h>
 #include <libavutil/hwcontext_vaapi.h>
 #include <libavutil/pixdesc.h>
+#include <libswscale/swscale.h>
 }
 
 namespace facebook::torchcodec {
@@ -74,7 +75,10 @@ bool has_fp64(const StableDevice& device) {
 
 UniqueAVBufferRef getVaapiContext(const StableDevice& device) {
   enum AVHWDeviceType type = av_hwdevice_find_type_by_name("vaapi");
-  TORCH_CHECK(type != AV_HWDEVICE_TYPE_NONE, "Failed to find vaapi device");
+  if (type == AV_HWDEVICE_TYPE_NONE) {
+    LOG(WARNING) << "VAAPI hwdevice type not found in this FFmpeg build.";
+    return UniqueAVBufferRef(nullptr);
+  }
   int deviceIndex = getDeviceIndex(device);
 
   UniqueAVBufferRef hw_device_ctx = g_cached_hw_device_ctxs.get(device);
@@ -94,12 +98,52 @@ UniqueAVBufferRef getVaapiContext(const StableDevice& device) {
   AVBufferRef* ctx = nullptr;
   int err = av_hwdevice_ctx_create(&ctx, type, renderD.c_str(), nullptr, 0);
   if (err < 0) {
-    TORCH_CHECK(
-        false,
-        "Failed to create specified HW device: ",
-        getFFMPEGErrorStringFromErrorCode(err));
+    LOG(WARNING) << "Failed to create VAAPI device context on " << renderD
+                 << ": " << getFFMPEGErrorStringFromErrorCode(err)
+                 << "; all codecs will fall back to CPU.";
+    return UniqueAVBufferRef(nullptr);
   }
   return UniqueAVBufferRef(ctx);
+}
+
+// Resolve the VAAPI render-node path this XPU device should open. Duplicates
+// getVaapiContext's internal logic so we can surface the path for diagnostics
+// even when getVaapiContext returns null.
+std::string resolveRenderD(const StableDevice& device) {
+  std::string renderD = "/dev/dri/renderD128";
+  int deviceIndex = getDeviceIndex(device);
+  sycl::device syclDevice = c10::xpu::get_raw_device(deviceIndex);
+  if (syclDevice.has(sycl::aspect::ext_intel_pci_address)) {
+    auto BDF =
+        syclDevice.get_info<sycl::ext::intel::info::device::pci_address>();
+    renderD = "/dev/dri/by-path/pci-" + BDF + "-render";
+  }
+  return renderD;
+}
+
+// Returns true if FFmpeg was built with VAAPI HW decode support for this
+// codec. Physical device capability is validated lazily at the first decoded
+// frame via the silent-SW-fallback detection in convertAVFrameToFrameOutput.
+// The AVBufferRef argument is intentionally unused; this is a pure FFmpeg
+// metadata check.
+bool deviceSupportsHWDecode(
+    AVBufferRef* /*hw_device_ctx*/,
+    AVCodecID codec_id) {
+  const AVCodec* decoder = avcodec_find_decoder(codec_id);
+  if (!decoder) {
+    return false;
+  }
+  for (int i = 0;; ++i) {
+    const AVCodecHWConfig* cfg = avcodec_get_hw_config(decoder, i);
+    if (!cfg) {
+      break;
+    }
+    if ((cfg->methods & AV_CODEC_HW_CONFIG_METHOD_HW_DEVICE_CTX) &&
+        cfg->device_type == AV_HWDEVICE_TYPE_VAAPI) {
+      return true;
+    }
+  }
+  return false;
 }
 
 torch::stable::Tensor allocateEmptyHWCTensor(
@@ -114,6 +158,62 @@ torch::stable::Tensor allocateEmptyHWCTensor(
       kStableUInt8,
       std::nullopt,
       device);
+}
+
+// Self-contained SW NV12/YUV->RGB24 conversion for the CPU fallback path.
+// Uses libswscale directly rather than delegating to CpuDeviceInterface: the
+// relevant torchcodec symbols (CpuDeviceInterface ctor, createDeviceInterface)
+// are not exported from the installed libtorchcodec_core6.so, so delegation is
+// not linkable against the shipped wheel.
+void convertSWFrameToRGB_sws(
+    AVFrame* avFrame,
+    torch::stable::Tensor& dstRGB_CPU) {
+  const int width = avFrame->width;
+  const int height = avFrame->height;
+  auto srcFormat = static_cast<AVPixelFormat>(avFrame->format);
+
+  SwsContext* sws = sws_getContext(
+      width,
+      height,
+      srcFormat,
+      width,
+      height,
+      AV_PIX_FMT_RGB24,
+      SWS_BILINEAR,
+      nullptr,
+      nullptr,
+      nullptr);
+  TORCH_CHECK(
+      sws != nullptr,
+      "sws_getContext failed for ",
+      av_get_pix_fmt_name(srcFormat),
+      " -> RGB24 at ",
+      width,
+      "x",
+      height);
+
+  uint8_t* dstData[4] = {
+      static_cast<uint8_t*>(dstRGB_CPU.mutable_data_ptr()),
+      nullptr,
+      nullptr,
+      nullptr};
+  int dstLinesize[4] = {width * 3, 0, 0, 0};
+
+  int scaled = sws_scale(
+      sws,
+      avFrame->data,
+      avFrame->linesize,
+      0,
+      height,
+      dstData,
+      dstLinesize);
+  sws_freeContext(sws);
+  TORCH_CHECK(
+      scaled == height,
+      "sws_scale produced ",
+      scaled,
+      " lines, expected ",
+      height);
 }
 
 } // namespace xpu
@@ -141,7 +241,16 @@ XpuDeviceInterface::XpuDeviceInterface(const StableDevice& device)
   // This is a dummy tensor to initialize the xpu context.
   torch::stable::Tensor dummyTensorForXpuInitialization = torch::stable::empty(
       {1}, kStableUInt8, std::nullopt, StableDevice(device));
+
+  renderD_ = xpu::resolveRenderD(device_);
+
+  // Attempt to create the VAAPI device context. If this fails, ctx_ remains
+  // null and registerHardwareDeviceWithCodec will route every codec to CPU.
   ctx_ = xpu::getVaapiContext(device_);
+  if (!ctx_) {
+    VLOG(1) << "No VAAPI device context available on " << renderD_
+            << "; all streams will use SW decode via CPU fallback.";
+  }
 
   if (xpu::use_sycl_color_conversion_kernel()) {
     VLOG(1) << "XpuDeviceInterface initialized with SYCL kernel backend";
@@ -164,7 +273,7 @@ XpuDeviceInterface::~XpuDeviceInterface() {
 void XpuDeviceInterface::initialize(
     const AVStream* avStream,
     [[maybe_unused]] const UniqueDecodingAVFormatContext& avFormatCtx,
-    [[maybe_unused]] const SharedAVCodecContext& codecContext) {
+    const SharedAVCodecContext& codecContext) {
   TORCH_CHECK(avStream != nullptr, "avStream is null");
   codecContext_ = codecContext;
   timeBase_ = avStream->time_base;
@@ -179,8 +288,16 @@ void XpuDeviceInterface::initializeVideo(
 
 void XpuDeviceInterface::registerHardwareDeviceWithCodec(
     AVCodecContext* codecContext) {
-  TORCH_CHECK(ctx_, "FFmpeg HW device has not been initialized");
   TORCH_CHECK(codecContext != nullptr, "codecContext is null");
+  if (!ctx_ ||
+      !xpu::deviceSupportsHWDecode(ctx_.get(), codecContext->codec_id)) {
+    LOG(WARNING) << "No VAAPI HW decode for codec "
+                 << avcodec_get_name(codecContext->codec_id) << " on device "
+                 << renderD_ << "; falling back to CPU for this stream.";
+    hwDecodeActiveForCurrentStream_ = false;
+    return;
+  }
+  hwDecodeActiveForCurrentStream_ = true;
   codecContext->hw_device_ctx = av_buffer_ref(ctx_.get());
 }
 
@@ -315,6 +432,41 @@ void XpuDeviceInterface::convertAVFrameToFrameOutput(
     UniqueAVFrame& avFrame,
     FrameOutput& frameOutput,
     std::optional<torch::stable::Tensor> preAllocatedOutputTensor) {
+  // Detect silent SW fallback: HW path was requested but FFmpeg produced a SW
+  // frame. This happens on devices without video decode engines (e.g. PVC),
+  // where av_hwdevice_ctx_create succeeds but the hardware has no media
+  // blocks, so FFmpeg silently falls back to software decode on the first
+  // packet.
+  if (hwDecodeActiveForCurrentStream_ && avFrame->format != AV_PIX_FMT_VAAPI) {
+    LOG(WARNING) << "Expected VAAPI frame but got SW format "
+                 << av_get_pix_fmt_name((AVPixelFormat)avFrame->format)
+                 << " on device " << renderD_
+                 << "; device has no HW decode engine for this codec."
+                 << " Switching stream to CPU path.";
+    hwDecodeActiveForCurrentStream_ = false;
+  }
+
+  if (!hwDecodeActiveForCurrentStream_) {
+    // Self-contained SW->RGB conversion via libswscale. We do not delegate to
+    // CpuDeviceInterface because its constructor and the createDeviceInterface
+    // factory are not exported from the installed libtorchcodec_core wheel.
+    auto frameDims = FrameDims(avFrame->height, avFrame->width);
+    torch::stable::Tensor cpuRGB = torch::stable::empty(
+        {frameDims.height, frameDims.width, 3},
+        kStableUInt8,
+        std::nullopt,
+        StableDevice(kStableCPU));
+    xpu::convertSWFrameToRGB_sws(avFrame.get(), cpuRGB);
+
+    if (preAllocatedOutputTensor.has_value()) {
+      torch::stable::copy_(preAllocatedOutputTensor.value(), cpuRGB);
+      frameOutput.data = preAllocatedOutputTensor.value();
+    } else {
+      frameOutput.data = cpuRGB;
+    }
+    return;
+  }
+
   // TODO: consider to copy handling of CPU frame from CUDA
   // TODO: consider to copy NV12 format check from CUDA
   TORCH_CHECK(

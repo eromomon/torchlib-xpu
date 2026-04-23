@@ -43,6 +43,16 @@ class XpuDeviceInterface : public DeviceInterface {
   AVRational timeBase_;
   bool has_fp64_;
 
+  // VAAPI render-node path used for this XPU device (e.g. /dev/dri/renderD128
+  // or a PCI-BDF-indexed path). Captured at construction so it can appear in
+  // diagnostic logs emitted later by the CPU-fallback path.
+  std::string renderD_;
+
+  // Per-stream flag set by registerHardwareDeviceWithCodec(). Stays false if
+  // VAAPI is unavailable, if the codec has no VAAPI decode support, or if the
+  // first decoded frame reveals a silent FFmpeg SW fallback.
+  bool hwDecodeActiveForCurrentStream_ = false;
+
   UniqueAVBufferRef ctx_;
 
   std::unique_ptr<FilterGraph> filterGraph_;
