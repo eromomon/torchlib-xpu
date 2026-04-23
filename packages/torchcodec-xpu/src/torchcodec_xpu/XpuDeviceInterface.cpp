@@ -172,48 +172,22 @@ void convertSWFrameToRGB_sws(
   const int height = avFrame->height;
   auto srcFormat = static_cast<AVPixelFormat>(avFrame->format);
 
-  SwsContext* sws = sws_getContext(
-      width,
-      height,
-      srcFormat,
-      width,
-      height,
-      AV_PIX_FMT_RGB24,
-      SWS_BILINEAR,
-      nullptr,
-      nullptr,
-      nullptr);
+  SwsContext* sws = sws_getContext(width, height, srcFormat, width, height,
+      AV_PIX_FMT_RGB24, SWS_BILINEAR, nullptr, nullptr, nullptr);
   TORCH_CHECK(
-      sws != nullptr,
-      "sws_getContext failed for ",
-      av_get_pix_fmt_name(srcFormat),
-      " -> RGB24 at ",
-      width,
-      "x",
+      sws != nullptr, "sws_getContext failed for ", av_get_pix_fmt_name(srcFormat),
+      " -> RGB24 at ", width, "x",
       height);
 
-  uint8_t* dstData[4] = {
-      static_cast<uint8_t*>(dstRGB_CPU.mutable_data_ptr()),
-      nullptr,
-      nullptr,
-      nullptr};
+  uint8_t* dstData[4] = {static_cast<uint8_t*>(dstRGB_CPU.mutable_data_ptr()),
+      nullptr, nullptr, nullptr};
   int dstLinesize[4] = {width * 3, 0, 0, 0};
 
-  int scaled = sws_scale(
-      sws,
-      avFrame->data,
-      avFrame->linesize,
-      0,
-      height,
-      dstData,
-      dstLinesize);
+  int scaled = sws_scale(sws, avFrame->data, avFrame->linesize, 0,
+      height, dstData, dstLinesize);
   sws_freeContext(sws);
   TORCH_CHECK(
-      scaled == height,
-      "sws_scale produced ",
-      scaled,
-      " lines, expected ",
-      height);
+      scaled == height, "sws_scale produced ", scaled, " lines, expected ", height);
 }
 
 } // namespace xpu
@@ -371,12 +345,7 @@ torch::stable::Tensor AVFrameToTensor(
   void* usm_ptr = nullptr;
 
   ze_result_t res = zeMemAllocDevice(
-      context->zeCtx,
-      &alloc_desc,
-      desc.objects[0].size,
-      0,
-      ze_device,
-      &usm_ptr);
+      context->zeCtx, &alloc_desc, desc.objects[0].size, 0, ze_device, &usm_ptr);
   TORCH_CHECK(
       res == ZE_RESULT_SUCCESS, "Failed to import fd=", desc.objects[0].fd);
 
