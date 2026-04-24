@@ -397,6 +397,7 @@ void XpuDeviceInterface::convertAVFrameToFrameOutput(
             << " on device " << renderD_
             << "; device has no HW decode engine for this codec."
             << " Switching stream to CPU path.";
+    std::string("[XPU Device Interface] Using CPU fallback.");
     hwDecodeActiveForCurrentStream_ = false;
   }
 
@@ -416,7 +417,7 @@ void XpuDeviceInterface::convertAVFrameToFrameOutput(
       torch::stable::copy_(preAllocatedOutputTensor.value(), cpuRGB);
       frameOutput.data = preAllocatedOutputTensor.value();
     } else {
-      frameOutput.data = cpuRGB;
+      frameOutput.data = torch::stable::to(cpuRGB, device_);
     }
     return;
   }
