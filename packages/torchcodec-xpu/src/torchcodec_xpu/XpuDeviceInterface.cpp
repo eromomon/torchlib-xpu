@@ -71,9 +71,7 @@ bool has_fp64(const StableDevice& device) {
   return syclDevice.has(sycl::aspect::fp64);
 }
 
-// Resolve the VAAPI render-node path this XPU device should open. Duplicates
-// getVaapiContext's internal logic so we can surface the path for diagnostics
-// even when getVaapiContext returns null.
+// Resolves the VAAPI render-node path this XPU device should open.
 std::string resolveRenderD(const StableDevice& device) {
   std::string renderD = "/dev/dri/renderD128";
   int deviceIndex = getDeviceIndex(device);
@@ -93,21 +91,11 @@ UniqueAVBufferRef getVaapiContext(const StableDevice& device) {
     VLOG(1) << "VAAPI hwdevice type not found in this FFmpeg build.";
     return UniqueAVBufferRef(nullptr);
   }
-  // int deviceIndex = getDeviceIndex(device);
 
   UniqueAVBufferRef hw_device_ctx = g_cached_hw_device_ctxs.get(device);
   if (hw_device_ctx) {
     return hw_device_ctx;
   }
-
-  //std::string renderD = "/dev/dri/renderD128";
-
-  //sycl::device syclDevice = c10::xpu::get_raw_device(deviceIndex);
-  //if (syclDevice.has(sycl::aspect::ext_intel_pci_address)) {
-  //  auto BDF =
-  //      syclDevice.get_info<sycl::ext::intel::info::device::pci_address>();
-  //  renderD = "/dev/dri/by-path/pci-" + BDF + "-render";
-  //}
 
   std::string renderD = resolveRenderD(device);
 
@@ -122,26 +110,9 @@ UniqueAVBufferRef getVaapiContext(const StableDevice& device) {
   return UniqueAVBufferRef(ctx);
 }
 
-// // Resolve the VAAPI render-node path this XPU device should open. Duplicates
-// // getVaapiContext's internal logic so we can surface the path for diagnostics
-// // even when getVaapiContext returns null.
-// std::string resolveRenderD(const StableDevice& device) {
-//   std::string renderD = "/dev/dri/renderD128";
-//   int deviceIndex = getDeviceIndex(device);
-//   sycl::device syclDevice = c10::xpu::get_raw_device(deviceIndex);
-//   if (syclDevice.has(sycl::aspect::ext_intel_pci_address)) {
-//     auto BDF =
-//         syclDevice.get_info<sycl::ext::intel::info::device::pci_address>();
-//     renderD = "/dev/dri/by-path/pci-" + BDF + "-render";
-//   }
-//   return renderD;
-// }
-
 // Returns true if FFmpeg was built with VAAPI HW decode support for this
 // codec. Physical device capability is validated lazily at the first decoded
 // frame via the silent-SW-fallback detection in convertAVFrameToFrameOutput.
-// The AVBufferRef argument is intentionally unused; this is a pure FFmpeg
-// metadata check.
 bool deviceSupportsHWDecode(AVCodecID codec_id) {
   const AVCodec* decoder = avcodec_find_decoder(codec_id);
   if (!decoder) {
@@ -450,8 +421,6 @@ void XpuDeviceInterface::convertAVFrameToFrameOutput(
     return;
   }
 
-  // TODO: consider to copy handling of CPU frame from CUDA
-  // TODO: consider to copy NV12 format check from CUDA
   TORCH_CHECK(
       avFrame->format == AV_PIX_FMT_VAAPI,
       "Expected format to be AV_PIX_FMT_VAAPI, got " +
