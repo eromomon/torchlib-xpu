@@ -37,11 +37,11 @@ At the moment Intel® Plugin for [TorchCodec] uses patched TorchCodec tests. To 
 
 ```
 export TORCHCODEC_XPU_PATH=$TORCHLIB_XPU_PATH/packages/torchcodec-xpu/
-git clone https://github.com/dvrogozh/torchcodec.git && cd torchcodec
+git clone https://github.com/meta-pytorch/torchcodec.git && cd torchcodec
 git am $TORCHCODEC_XPU_PATH/patches/0001-Add-XPU-support-to-tests.patch
 ```
 
-The patch file can be reviewed [here](packages/torchcodec-xpu/patches/0001-Add-XPU-support-to-tests.patch). The patch is known to apply clean on the following TorchCodec versions: `v0.10.0`.
+The patch file can be reviewed [here](packages/torchcodec-xpu/patches/0001-Add-XPU-support-to-tests.patch). The patch is known to apply clean on the following TorchCodec versions: `v0.11.1`.
 
 TorchCodec tests require some additional packages. Install them as follows:
 
