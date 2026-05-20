@@ -1,0 +1,196 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Edgar Romo Montiel <edgar.romo.montiel@intel.com>
+Date: Wed, 10 Jul 2026 12:00:00 -0800
+Subject: [PATCH] Add XPU support to video encoder tests
+
+Extends TorchCodec's video-encoder tests to also exercise the XPU device
+via the torchcodec_xpu plugin. Audio-encoder tests are intentionally left
+untouched. The two previously CUDA-only tests are generalized to run
+against any accelerator device (cuda + xpu) via a new `accel_devices`
+parametrization tuple.
+
+Because torchcodec's Encoder.cpp performs an exact device-equality check
+(index included), and torchcodec_xpu does not currently normalize
+`xpu:-1` -> `xpu:<current>`, each XPU-enabled test explicitly promotes
+`device="xpu"` to `f"xpu:{torch.xpu.current_device()}"` so the encoder
+and the input frames end up on the same fully-qualified device.
+
+Additionally, `test_write_frames_different_devices_errors` opens an XPU
+encoder that would otherwise be destroyed without ever receiving a frame.
+libavcodec's h264_vaapi encoder segfaults on the flush signal
+(`avcodec_send_frame(codec, NULL)`) when no frame was previously encoded,
+so on XPU we prime the encoder with one valid frame and close it
+explicitly before the test function returns. NVENC tolerates the empty
+flush; VAAPI does not.
+
+Depends on 0001-Add-XPU-support-to-tests.patch (defines the needs_xpu
+marker and imports torchcodec_xpu in test/utils.py).
+
+Signed-off-by: Edgar Romo Montiel <edgar.romo.montiel@intel.com>
+---
+ test/test_encoders.py | 82 ++++++++++++++++++++++++++++++++++++---------------
+ 1 file changed, 58 insertions(+), 24 deletions(-)
+
+diff --git a/test/test_encoders.py b/test/test_encoders.py
+--- a/test/test_encoders.py
++++ b/test/test_encoders.py
+@@ -1,3 +1,6 @@
++import torchcodec
++import torchcodec_xpu
++
+ import io
+ import os
+ import platform
+@@ -25,6 +28,7 @@ from .utils import (
+     NASA_AUDIO_MP3_44100,
+     NASA_VIDEO,
+     needs_cuda,
++    needs_xpu,
+     needs_ffmpeg_cli,
+     psnr,
+     SINE_MONO_S32,
+@@ -194,11 +198,23 @@ class TestEncoder:
+         pytest.param(
+             "cuda",
+             marks=[
+                 pytest.mark.needs_cuda,
+                 pytest.mark.skipif(in_fbcode(), reason="NVENC not available in fbcode"),
+             ],
+         ),
++        pytest.param("xpu", marks=pytest.mark.needs_xpu),
++    )
++
++    accel_devices = (
++        pytest.param(
++            "cuda",
++            marks=[
++                pytest.mark.needs_cuda,
++                pytest.mark.skipif(in_fbcode(), reason="NVENC not available in fbcode"),
++            ],
++        ),
++        pytest.param("xpu", marks=pytest.mark.needs_xpu),
+     )
+ 
+     @staticmethod
+     def _create_encoder(method, tmp_path, format):
+@@ -254,10 +270,12 @@ class TestEncoder:
+     def test_add_video_and_encode_frames(self, tmp_path, format, method, device):
++        if device == "xpu":
++            device = f"xpu:{torch.xpu.current_device()}"
+         source_decoder = VideoDecoder(str(TEST_SRC_2_720P.path))
+         source_frames = source_decoder.get_frames_in_range(start=0, stop=10).data.to(
+             device
+         )
+         frame_rate = source_decoder.metadata.average_fps
+-        percentage, atol = (96, 2) if device == "cuda" else (99, 2)
++        percentage, atol = (96, 2) if device.startswith(("cuda", "xpu")) else (99, 2)
+ 
+         enc, encoder_output, open_kwargs = self._create_encoder(
+             method, tmp_path, format
+@@ -314,10 +332,12 @@ class TestEncoder:
+     def test_fragmented_mp4(self, format, tmp_path, method, device):
++        if device == "xpu":
++            device = f"xpu:{torch.xpu.current_device()}"
+         source_decoder = VideoDecoder(str(TEST_SRC_2_720P.path))
+         source_frames = source_decoder.get_frames_in_range(start=0, stop=10).data.to(
+             device
+         )
+         frame_rate = source_decoder.metadata.average_fps
+-        percentage, atol = (96, 2) if device == "cuda" else (99, 2)
++        percentage, atol = (96, 2) if device.startswith(("cuda", "xpu")) else (99, 2)
+ 
+         enc, encoder_output, open_kwargs = self._create_encoder(
+             method, tmp_path, format
+@@ -333,9 +353,13 @@ class TestEncoder:
+             "flush_packets": "1",
+             "threads": "1",
+         }
+-        if device == "cuda":
+-            extra_options.update({"qp": "1", "delay": "0"})
++        if device.startswith(("cuda", "xpu")):
++            extra_options["qp"] = "1"
++            if device.startswith("cuda"):
++                extra_options["delay"] = "0"
++            else:
++                extra_options["async_depth"] = "1"
+             pixel_format, crf = None, None
+         else:
+             extra_options["tune"] = "zerolatency"
+             pixel_format, crf = "yuv444p", 0
+@@ -374,7 +398,9 @@ class TestEncoder:
+ 
+     @pytest.mark.parametrize("method", ("to_file", "to_file_like"))
+     @pytest.mark.parametrize("device", cpu_and_oss_cuda)
+     def test_write_frames_mismatched_dimensions_errors(self, tmp_path, method, device):
++        if device == "xpu":
++            device = f"xpu:{torch.xpu.current_device()}"
+         enc, _, open_kwargs = self._create_encoder(method, tmp_path, "mp4")
+         video = enc.add_video(height=256, width=256, frame_rate=30.0, device=device)
+         self._open_encoder(enc, open_kwargs)
+@@ -395,41 +421,50 @@ class TestEncoder:
+         with pytest.raises(RuntimeError, match="same dimensions"):
+             video.add_frames(frames_512)
+ 
+-    @needs_cuda
+     @pytest.mark.parametrize("method", ("to_file", "to_file_like"))
+-    def test_write_frames_different_devices_errors(self, tmp_path, method):
++    @pytest.mark.parametrize("device", accel_devices)
++    def test_write_frames_different_devices_errors(self, tmp_path, method, device):
++        if device == "xpu":
++            device = f"xpu:{torch.xpu.current_device()}"
+         cpu_frames = torch.randint(0, 256, (2, 3, 256, 256), dtype=torch.uint8)
+-        cuda_frames = cpu_frames.to("cuda")
++        accel_frames = cpu_frames.to(device)
+ 
+-        # CPU stream, write CUDA frames
++        # CPU stream, write accelerator frames
+         enc, _, open_kwargs = self._create_encoder(method, tmp_path, "mp4")
+         video = enc.add_video(height=256, width=256, frame_rate=30.0)
+         self._open_encoder(enc, open_kwargs)
+         video.add_frames(cpu_frames)
+         with pytest.raises(RuntimeError, match="same device"):
+-            video.add_frames(cuda_frames)
++            video.add_frames(accel_frames)
+         enc.close()
+ 
+-        # CUDA stream, write CPU frames
+-        cuda_dir = tmp_path / "cuda"
+-        cuda_dir.mkdir()
+-        enc, _, open_kwargs = self._create_encoder(method, cuda_dir, "mp4")
+-        video = enc.add_video(height=256, width=256, frame_rate=30.0, device="cuda")
++        # Accelerator stream, write CPU frames
++        accel_dir = tmp_path / device.replace(":", "_")
++        accel_dir.mkdir()
++        enc, _, open_kwargs = self._create_encoder(method, accel_dir, "mp4")
++        video = enc.add_video(height=256, width=256, frame_rate=30.0, device=device)
+         self._open_encoder(enc, open_kwargs)
+         with pytest.raises(RuntimeError, match="same device"):
+             video.add_frames(cpu_frames)
++        # Prime the accelerator encoder with one valid frame and close it
++        # explicitly. Without this, VAAPI's flush path (invoked from
++        # ~MultiStreamEncoder -> close -> flush_buffers -> avcodec_send_frame)
++        # segfaults inside libavcodec when asked to flush an h264_vaapi encoder
++        # that never received a single frame.
++        video.add_frames(cpu_frames.to(device))
++        enc.close()
+ 
+-    @needs_cuda
+     @pytest.mark.parametrize("method", ("to_file", "to_file_like"))
+-    def test_device_None_respects_default_device(self, tmp_path, method):
++    @pytest.mark.parametrize("device", accel_devices)
++    def test_device_None_respects_default_device(self, tmp_path, method, device):
+         source_decoder = VideoDecoder(str(TEST_SRC_2_720P.path))
+         source_frames = source_decoder.get_frames_in_range(start=0, stop=5).data.to(
+-            "cuda"
++            device
+         )
+         frame_rate = source_decoder.metadata.average_fps
+ 
+         enc, encoder_output, open_kwargs = self._create_encoder(method, tmp_path, "mp4")
+-        with torch.device("cuda:0"):
++        with torch.device(f"{device}:0"):
+             video = enc.add_video(
+                 height=source_frames.shape[2],
+                 width=source_frames.shape[3],
+-- 
+2.48.1
