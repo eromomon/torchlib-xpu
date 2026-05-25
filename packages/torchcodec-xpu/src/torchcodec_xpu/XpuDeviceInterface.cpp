@@ -5,7 +5,6 @@
 #include <stdlib.h>
 #include <string>
 #include <unordered_map>
-#include <iostream>
 
 #include <level_zero/ze_api.h>
 #include <va/va_drmcommon.h>
@@ -573,9 +572,8 @@ std::optional<const AVCodec*> XpuDeviceInterface::findCodec(
 // ============================================================
 // Encoding: setupHardwareFrameContextForEncoding
 // ============================================================
-// Allocates and initializes a VAAPI hw_frames_ctx on the codec context.
-// Mirrors the CUDA implementation in CudaDeviceInterface.cpp, with
-// AV_PIX_FMT_CUDA -> AV_PIX_FMT_VAAPI as the only pixel format change.
+// Allocates a VAAPI hw_frames_ctx on the codec context so the encoder
+// can write directly into VAAPI surfaces (NV12 layout, VAAPI wrapper).
 void XpuDeviceInterface::setupHardwareFrameContextForEncoding(
     AVCodecContext* codecContext) {
   TORCH_CHECK(
@@ -592,7 +590,7 @@ void XpuDeviceInterface::setupHardwareFrameContextForEncoding(
 
   // sw_pix_fmt: the software (CPU-accessible) format the encoder consumes inside the surface
   // pix_fmt:    the hardware wrapper format the codec sees (must match hw_frames_ctx->format)
-  codecContext->sw_pix_fmt = DeviceInterface::CUDA_ENCODING_PIXEL_FORMAT; // AV_PIX_FMT_NV12
+  codecContext->sw_pix_fmt = AV_PIX_FMT_NV12;
   codecContext->pix_fmt    = AV_PIX_FMT_VAAPI;
 
   auto* hwFramesCtx = reinterpret_cast<AVHWFramesContext*>(hwFramesCtxRef->data);

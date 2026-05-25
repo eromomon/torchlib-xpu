@@ -2,17 +2,7 @@ diff --git a/src/torchcodec/_core/Encoder.cpp b/src/torchcodec/_core/Encoder.cpp
 index 2fe136fb..d024834b 100644
 --- a/src/torchcodec/_core/Encoder.cpp
 +++ b/src/torchcodec/_core/Encoder.cpp
-@@ -787,7 +787,8 @@ void VideoEncoder::initializeEncoder(
-   // The default CUDA interface is decode-only; encoders need the FFmpeg-based
-   // one.
-   deviceInterface_ = createDeviceInterface(
--      stableDevice, stableDevice.type() == kStableCUDA ? "ffmpeg" : "default");
-+      stableDevice,
-+      stableDevice.type() == kStableCUDA ? "ffmpeg" : "default");
-   const AVCodec* avCodec = nullptr;
-   // If codec arg is provided, find codec using logic similar to FFmpeg:
-   // https://github.com/FFmpeg/FFmpeg/blob/master/fftools/ffmpeg_opt.c#L804-L835
-@@ -846,7 +847,8 @@ void VideoEncoder::initializeEncoder(
+@@ -846,7 +846,8 @@ void VideoEncoder::initializeEncoder(
    if (videoStreamOptions.pixelFormat.has_value()) {
      // TODO-VideoEncoder: (P2) Enable pixel formats to be set by user on GPU
      // and handled with the appropriate NPP function on GPU.
@@ -22,7 +12,7 @@ index 2fe136fb..d024834b 100644
        STD_TORCH_CHECK(
            false,
            "Video encoding on GPU currently only supports the nv12 pixel format. "
-@@ -855,7 +857,8 @@ void VideoEncoder::initializeEncoder(
+@@ -855,7 +856,8 @@ void VideoEncoder::initializeEncoder(
      outPixelFormat =
          validatePixelFormat(*avCodec, videoStreamOptions.pixelFormat.value());
    } else {
@@ -32,7 +22,7 @@ index 2fe136fb..d024834b 100644
        // Default to nv12 pixel format when encoding on GPU.
        outPixelFormat = DeviceInterface::CUDA_ENCODING_PIXEL_FORMAT;
      } else {
-@@ -910,7 +913,8 @@ void VideoEncoder::initializeEncoder(
+@@ -910,7 +912,8 @@ void VideoEncoder::initializeEncoder(
          0);
    }
  
@@ -42,17 +32,7 @@ index 2fe136fb..d024834b 100644
      deviceInterface_->registerHardwareDeviceWithCodec(avCodecContext_.get());
      deviceInterface_->setupHardwareFrameContextForEncoding(
          avCodecContext_.get());
-@@ -1124,7 +1128,8 @@ void MultiStreamEncoder::addVideoStream(
-   // The default CUDA interface is decode-only; encoders need the FFmpeg-based
-   // one.
-   videoStream_->deviceInterface = createDeviceInterface(
--      stableDevice, stableDevice.type() == kStableCUDA ? "ffmpeg" : "default");
-+      stableDevice,
-+      stableDevice.type() == kStableCUDA ? "ffmpeg" : "default");
-   videoStream_->inHeight = height;
-   videoStream_->inWidth = width;
-   videoStream_->inFrameRate = frameRate;
-@@ -1208,7 +1213,7 @@ void MultiStreamEncoder::initializeVideoStream() {
+@@ -1208,7 +1211,7 @@ void MultiStreamEncoder::initializeVideoStream() {
    if (videoStream.options.pixelFormat.has_value()) {
      // TODO-MultiStreamEncoder: (P2) Enable pixel formats to be set by user on
      // GPU and handled with the appropriate NPP function on GPU.
@@ -61,7 +41,7 @@ index 2fe136fb..d024834b 100644
        STD_TORCH_CHECK(
            false,
            "Video encoding on GPU currently only supports the nv12 pixel format. "
-@@ -1217,7 +1222,7 @@ void MultiStreamEncoder::initializeVideoStream() {
+@@ -1217,7 +1220,7 @@ void MultiStreamEncoder::initializeVideoStream() {
      outPixelFormat =
          validatePixelFormat(*avCodec, videoStream.options.pixelFormat.value());
    } else {
@@ -70,7 +50,7 @@ index 2fe136fb..d024834b 100644
        // Default to nv12 pixel format when encoding on GPU.
        outPixelFormat = DeviceInterface::CUDA_ENCODING_PIXEL_FORMAT;
      } else {
-@@ -1275,7 +1280,7 @@ void MultiStreamEncoder::initializeVideoStream() {
+@@ -1275,7 +1278,7 @@ void MultiStreamEncoder::initializeVideoStream() {
          0);
    }
  
