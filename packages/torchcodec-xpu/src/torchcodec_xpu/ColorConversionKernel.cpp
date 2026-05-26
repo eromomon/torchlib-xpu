@@ -35,9 +35,9 @@ struct rgb_matrix {
 // ============================================================
 struct yuv_matrix {
   static constexpr float3x3 BT709 = {
-    sycl::float3{  0.2126f,    0.7152f,    0.0722f  },  // Y
-    sycl::float3{ -0.1146f,   -0.3854f,    0.5f     },  // Cb
-    sycl::float3{  0.5f,      -0.4542f,   -0.0458f  }   // Cr
+    sycl::float3{  0.212600f,   0.715200f,   0.072200f  },  // Y
+    sycl::float3{ -0.114572f,  -0.385428f,   0.5f       },  // Cb
+    sycl::float3{  0.5f,       -0.454153f,  -0.045847f  }   // Cr
   };
   static constexpr float3x3 BT601 = {
     sycl::float3{  0.299f,     0.587f,     0.114f   },  // Y
