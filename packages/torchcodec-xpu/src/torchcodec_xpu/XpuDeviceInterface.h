@@ -32,6 +32,15 @@ class XpuDeviceInterface : public DeviceInterface {
 
   void registerHardwareDeviceWithCodec(AVCodecContext* codecContext) override;
 
+  // ---- Encoding overrides ----
+  UniqueAVFrame convertTensorToAVFrameForEncoding(
+      const torch::stable::Tensor& tensor,
+      int frameIndex,
+      AVCodecContext* codecContext) override;
+
+  void setupHardwareFrameContextForEncoding(
+      AVCodecContext* codecContext) override;
+
   void convertAVFrameToFrameOutput(
       UniqueAVFrame& avFrame,
       FrameOutput& frameOutput,
@@ -64,6 +73,20 @@ class XpuDeviceInterface : public DeviceInterface {
   void convertAVFrameToFrameOutput_FilterGraph(
       UniqueAVFrame& avFrame,
       torch::stable::Tensor& dst);
+
+  // ---- Encoding helpers ----
+  // SYCL path: exports VAAPI surface as DMA-BUF, imports via Level Zero USM,
+  // runs convertRGBToNV12 kernel directly on the surface memory.
+  UniqueAVFrame encodeConvert_SYCL(
+      const torch::stable::Tensor& tensor,
+      AVCodecContext* codecContext,
+      UniqueAVFrame vaFrame);
+  // CPU fallback: moves tensor to CPU, uses libswscale GBRP->NV12,
+  // then av_hwframe_transfer_data to upload into the VAAPI surface.
+  UniqueAVFrame encodeConvert_CPU(
+      const torch::stable::Tensor& tensor,
+      AVCodecContext* codecContext,
+      UniqueAVFrame vaFrame);
 };
 
 } // namespace facebook::torchcodec
