@@ -547,24 +547,55 @@ bool XpuDeviceInterface::convertAVFrameToFrameOutput_SYCL(
 std::optional<const AVCodec*> XpuDeviceInterface::findCodec(
     const AVCodecID& codecId,
     bool isDecoder) {
-  void* i = nullptr;
-  const AVCodec* codec = nullptr;
-  while ((codec = av_codec_iterate(&i)) != nullptr) {
-    if (isDecoder) {
-      if (codec->id != codecId || !av_codec_is_decoder(codec)) {
-        continue;
+  // Look up the first codec (decoder or encoder) registered for `id` that
+  // advertises a VAAPI hw_config.
+  auto findVaapiForId = [isDecoder](AVCodecID id) -> const AVCodec* {
+    void* i = nullptr;
+    const AVCodec* codec = nullptr;
+    while ((codec = av_codec_iterate(&i)) != nullptr) {
+      if (isDecoder) {
+        if (codec->id != id || !av_codec_is_decoder(codec)) {
+          continue;
+        }
+      } else {
+        if (codec->id != id || !av_codec_is_encoder(codec)) {
+          continue;
+        }
       }
-    } else {
-      if (codec->id != codecId || !av_codec_is_encoder(codec)) {
-        continue;
+
+      const AVCodecHWConfig* config = nullptr;
+      for (int j = 0; (config = avcodec_get_hw_config(codec, j)) != nullptr;
+           ++j) {
+        if (config->device_type == AV_HWDEVICE_TYPE_VAAPI) {
+          return codec;
+        }
       }
     }
+    return nullptr;
+  };
 
-    const AVCodecHWConfig* config = nullptr;
-    for (int j = 0; (config = avcodec_get_hw_config(codec, j)) != nullptr;
-         ++j) {
-      if (config->device_type == AV_HWDEVICE_TYPE_VAAPI) {
-        return codec;
+  // 1) Try the requested codec id first.
+  if (const AVCodec* c = findVaapiForId(codecId)) {
+    return c;
+  }
+
+  // 2) Encoder-only fallback: if no VAAPI encoder exists for codecId
+  // (e.g. mp4's default MPEG4), substitute a HW-capable alternative so
+  // avcodec_open2 doesn't fail on a SW or non-VAAPI HW encoder.
+  if (!isDecoder) {
+    static constexpr AVCodecID kHwEncoderFallbacks[] = {
+        AV_CODEC_ID_H264,
+        AV_CODEC_ID_HEVC,
+        AV_CODEC_ID_AV1,
+    };
+    for (AVCodecID fb : kHwEncoderFallbacks) {
+      if (fb == codecId) {
+        continue;
+      }
+      if (const AVCodec* c = findVaapiForId(fb)) {
+        VLOG(1) << "No VAAPI encoder for codec id " << codecId
+                << ", substituting " << c->name;
+        return c;
       }
     }
   }
@@ -648,17 +679,17 @@ UniqueAVFrame XpuDeviceInterface::convertTensorToAVFrameForEncoding(
   if (xpu::use_sycl_color_conversion_kernel()) {
     VLOG(9) << "[XPU Encoder] Encoding frame " << frameIndex
             << " via SYCL on device=xpu:" << device_.index();
-    return encodeConvert_SYCL(tensor, codecContext, std::move(vaFrame));
+    return convertTensorToAVFrameForEncoding_SYCL(tensor, codecContext, std::move(vaFrame));
   }
 #endif
   VLOG(9) << "[XPU Encoder] Encoding frame " << frameIndex << " via CPU fallback";
-  return encodeConvert_CPU(tensor, codecContext, std::move(vaFrame));
+  return convertTensorToAVFrameForEncoding_CPU(tensor, codecContext, std::move(vaFrame));
 }
 
 // ============================================================
-// Encoding: encodeConvert_SYCL
+// Encoding: convertTensorToAVFrameForEncoding_SYCL
 // ============================================================
-UniqueAVFrame XpuDeviceInterface::encodeConvert_SYCL(
+UniqueAVFrame XpuDeviceInterface::convertTensorToAVFrameForEncoding_SYCL(
     const torch::stable::Tensor& tensor,
     AVCodecContext* codecContext,
     UniqueAVFrame vaFrame) {
@@ -757,14 +788,14 @@ UniqueAVFrame XpuDeviceInterface::encodeConvert_SYCL(
   vaFrame->color_range = codecContext->color_range;
   return vaFrame;
 #else
-  return encodeConvert_CPU(tensor, codecContext, std::move(vaFrame));
+  return convertTensorToAVFrameForEncoding_CPU(tensor, codecContext, std::move(vaFrame));
 #endif
 }
 
 // ============================================================
-// Encoding: encodeConvert_CPU  (CPU fallback)
+// Encoding: convertTensorToAVFrameForEncoding_CPU  (CPU fallback)
 // ============================================================
-UniqueAVFrame XpuDeviceInterface::encodeConvert_CPU(
+UniqueAVFrame XpuDeviceInterface::convertTensorToAVFrameForEncoding_CPU(
     const torch::stable::Tensor& tensor,
     AVCodecContext* codecContext,
     UniqueAVFrame vaFrame) {
