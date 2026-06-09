@@ -135,6 +135,33 @@ torch::stable::Tensor allocateEmptyHWCTensor(
       device);
 }
 
+// Allocates a VAAPI-backed NV12 AVFrame for encoding by pulling a buffer from
+// the codec's hw_frames_ctx pool created in setupHardwareFrameContextForEncoding.
+UniqueAVFrame allocNV12Frame(
+    int width,
+    int height,
+    int frameIndex,
+    AVCodecContext* codecContext) {
+  TORCH_CHECK(codecContext != nullptr, "codecContext is null");
+  TORCH_CHECK(
+      codecContext->hw_frames_ctx != nullptr,
+      "hw_frames_ctx is null: call setupHardwareFrameContextForEncoding first");
+
+  UniqueAVFrame vaFrame(av_frame_alloc());
+  TORCH_CHECK(vaFrame != nullptr, "Failed to allocate AVFrame for encoding");
+  vaFrame->format = AV_PIX_FMT_VAAPI;
+  vaFrame->width  = width;
+  vaFrame->height = height;
+  vaFrame->pts    = frameIndex;
+
+  int ret = av_hwframe_get_buffer(codecContext->hw_frames_ctx, vaFrame.get(), 0);
+  TORCH_CHECK(
+      ret >= 0,
+      "av_hwframe_get_buffer failed: ",
+      getFFMPEGErrorStringFromErrorCode(ret));
+  return vaFrame;
+}
+
 } // namespace xpu
 
 int getDeviceIndex(const StableDevice& device) {
@@ -660,40 +687,41 @@ UniqueAVFrame XpuDeviceInterface::convertTensorToAVFrameForEncoding(
       codecContext->hw_frames_ctx != nullptr,
       "hw_frames_ctx is null: call setupHardwareFrameContextForEncoding first");
 
-  UniqueAVFrame vaFrame(av_frame_alloc());
-  TORCH_CHECK(vaFrame != nullptr, "Failed to allocate AVFrame for encoding");
-  vaFrame->format = AV_PIX_FMT_VAAPI;
-  vaFrame->height = static_cast<int>(tensor.sizes()[1]);
-  vaFrame->width  = static_cast<int>(tensor.sizes()[2]);
-  vaFrame->pts    = frameIndex;
-
-  // Allocate a VAAPI surface from the hw_frames_ctx pool created in
-  // setupHardwareFrameContextForEncoding.
-  int ret = av_hwframe_get_buffer(codecContext->hw_frames_ctx, vaFrame.get(), 0);
-  TORCH_CHECK(
-      ret >= 0,
-      "av_hwframe_get_buffer failed: ",
-      getFFMPEGErrorStringFromErrorCode(ret));
-
-#ifdef WITH_SYCL_KERNELS
-  if (xpu::use_sycl_color_conversion_kernel()) {
+  // Try the optimized SYCL path first. It returns a null UniqueAVFrame when
+  // SYCL is unavailable (USE_SYCL_KERNELS disabled, no FP64 support, or built
+  // without WITH_SYCL_KERNELS). In that case, fall back to the CPU path.
+  UniqueAVFrame avFrame =
+      convertTensorToAVFrameForEncoding_SYCL(tensor, frameIndex, codecContext);
+  if (avFrame) {
     VLOG(9) << "[XPU Encoder] Encoding frame " << frameIndex
             << " via SYCL on device=xpu:" << device_.index();
-    return convertTensorToAVFrameForEncoding_SYCL(tensor, codecContext, std::move(vaFrame));
+    return avFrame;
   }
-#endif
+
   VLOG(9) << "[XPU Encoder] Encoding frame " << frameIndex << " via CPU fallback";
-  return convertTensorToAVFrameForEncoding_CPU(tensor, codecContext, std::move(vaFrame));
+  return convertTensorToAVFrameForEncoding_CPU(tensor, frameIndex, codecContext);
 }
 
 // ============================================================
 // Encoding: convertTensorToAVFrameForEncoding_SYCL
 // ============================================================
 UniqueAVFrame XpuDeviceInterface::convertTensorToAVFrameForEncoding_SYCL(
-    const torch::stable::Tensor& tensor,
-    AVCodecContext* codecContext,
-    UniqueAVFrame vaFrame) {
+    [[maybe_unused]] const torch::stable::Tensor& tensor,
+    [[maybe_unused]] int frameIndex,
+    [[maybe_unused]] AVCodecContext* codecContext) {
+  if (!xpu::use_sycl_color_conversion_kernel()) {
+    return UniqueAVFrame();
+  }
+  if (!has_fp64_) {
+    return UniqueAVFrame();
+  }
+
+  UniqueAVFrame vaFrame;
 #ifdef WITH_SYCL_KERNELS
+  const int width  = static_cast<int>(tensor.sizes()[2]);
+  const int height = static_cast<int>(tensor.sizes()[1]);
+  vaFrame = xpu::allocNV12Frame(width, height, frameIndex, codecContext);
+
   VADisplay display = getVaDisplayFromAV(vaFrame.get());
   VASurfaceID surfaceId = (VASurfaceID)(uintptr_t)vaFrame->data[3];
 
@@ -709,9 +737,9 @@ UniqueAVFrame XpuDeviceInterface::convertTensorToAVFrameForEncoding_SYCL(
       "vaExportSurfaceHandle (WRITE_ONLY) failed: ",
       vaErrorStr(sts));
   TORCH_CHECK(desc.num_objects == 1, "Expected 1 DMA-BUF object, got ", desc.num_objects);
-  // NV12 surfaces can be exported in two valid layouts depending on the driver:
-  //  Layout A: 1 layer,  2 planes  — layers[0].planes[0]=Y, layers[0].planes[1]=UV
-  //  Layout B: 2 layers, 1 plane each — layers[0].planes[0]=Y, layers[1].planes[0]=UV
+  // NV12 export layouts seen on Intel iHD/i915:
+  //   A: 1 layer × 2 planes (Y, UV).   B: 2 layers × 1 plane (Y; UV) — used by BMG.
+  // Both describe the same DMA-BUF; only the plane offsets/pitches differ.
   const bool layoutA = (desc.num_layers == 1 && desc.layers[0].num_planes == 2);
   const bool layoutB = (desc.num_layers == 2 && desc.layers[0].num_planes == 1
                         && desc.layers[1].num_planes == 1);
@@ -719,6 +747,7 @@ UniqueAVFrame XpuDeviceInterface::convertTensorToAVFrameForEncoding_SYCL(
       layoutA || layoutB,
       "Unsupported NV12 export layout: num_layers=", desc.num_layers,
       " layers[0].num_planes=", desc.layers[0].num_planes);
+
   // Get Level Zero context and device handles via SYCL interop.
   sycl::queue queue = c10::xpu::getCurrentXPUStream(device_.index());
   ze_context_handle_t zeCtx  = nullptr;
@@ -786,10 +815,8 @@ UniqueAVFrame XpuDeviceInterface::convertTensorToAVFrameForEncoding_SYCL(
 
   vaFrame->colorspace  = codecContext->colorspace;
   vaFrame->color_range = codecContext->color_range;
-  return vaFrame;
-#else
-  return convertTensorToAVFrameForEncoding_CPU(tensor, codecContext, std::move(vaFrame));
 #endif
+  return vaFrame;
 }
 
 // ============================================================
@@ -797,8 +824,13 @@ UniqueAVFrame XpuDeviceInterface::convertTensorToAVFrameForEncoding_SYCL(
 // ============================================================
 UniqueAVFrame XpuDeviceInterface::convertTensorToAVFrameForEncoding_CPU(
     const torch::stable::Tensor& tensor,
-    AVCodecContext* codecContext,
-    UniqueAVFrame vaFrame) {
+    int frameIndex,
+    AVCodecContext* codecContext) {
+  const int width  = static_cast<int>(tensor.sizes()[2]);
+  const int height = static_cast<int>(tensor.sizes()[1]);
+  UniqueAVFrame vaFrame =
+      xpu::allocNV12Frame(width, height, frameIndex, codecContext);
+
   // Move XPU tensor to CPU (blocking)
   torch::stable::Tensor cpuTensor =
       torch::stable::to(tensor, StableDevice(kStableCPU, 0));
