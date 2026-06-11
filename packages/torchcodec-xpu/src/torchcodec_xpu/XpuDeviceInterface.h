@@ -77,7 +77,7 @@ class XpuDeviceInterface : public DeviceInterface {
   // ---- Encoding helpers ----
   // SYCL path: exports VAAPI surface as DMA-BUF, imports via Level Zero USM,
   // runs convertRGBToNV12 directly on the surface. Returns null when SYCL
-  // is unavailable; caller falls back to the CPU path.
+  // is unavailable.
   UniqueAVFrame convertTensorToAVFrameForEncoding_SYCL(
       const torch::stable::Tensor& tensor,
       int frameIndex,
