@@ -1,47 +1,28 @@
+From: torchcodec-xpu maintainers <noreply@intel.com>
+Subject: [PATCH] Add XPU encoding support to Encoder
+
+Widens the three GPU-only encoder branches in
+MultiStreamEncoder::initializeVideoStream so that the XPU device type
+also takes the hardware encoding path (NV12 default + hw_frames_ctx
+setup) provided by XpuDeviceInterface.
+
+Upstream consolidated VideoEncoder::initializeEncoder into
+MultiStreamEncoder::initializeVideoStream, so the patch now only needs
+to touch that one function.
+---
 diff --git a/src/torchcodec/_core/Encoder.cpp b/src/torchcodec/_core/Encoder.cpp
-index 2fe136fb..d024834b 100644
 --- a/src/torchcodec/_core/Encoder.cpp
 +++ b/src/torchcodec/_core/Encoder.cpp
-@@ -846,7 +846,8 @@ void VideoEncoder::initializeEncoder(
-   if (videoStreamOptions.pixelFormat.has_value()) {
-     // TODO-VideoEncoder: (P2) Enable pixel formats to be set by user on GPU
-     // and handled with the appropriate NPP function on GPU.
--    if (frames_.device().type() == kStableCUDA) {
-+    if (frames_.device().type() == kStableCUDA ||
-+        frames_.device().type() == kStableXPU) {
-       STD_TORCH_CHECK(
-           false,
-           "Video encoding on GPU currently only supports the nv12 pixel format. "
-@@ -855,7 +856,8 @@ void VideoEncoder::initializeEncoder(
-     outPixelFormat =
-         validatePixelFormat(*avCodec, videoStreamOptions.pixelFormat.value());
-   } else {
--    if (frames_.device().type() == kStableCUDA) {
-+    if (frames_.device().type() == kStableCUDA ||
-+        frames_.device().type() == kStableXPU) {
-       // Default to nv12 pixel format when encoding on GPU.
-       outPixelFormat = DeviceInterface::CUDA_ENCODING_PIXEL_FORMAT;
-     } else {
-@@ -910,7 +912,8 @@ void VideoEncoder::initializeEncoder(
-         0);
-   }
+@@ -470,7 +470,7 @@ void MultiStreamEncoder::initializeVideoStream(VideoStream& videoStream) {
+   AVPixelFormat outPixelFormat = AV_PIX_FMT_NONE;
  
--  if (frames_.device().type() == kStableCUDA) {
-+  if (frames_.device().type() == kStableCUDA ||
-+      frames_.device().type() == kStableXPU) {
-     deviceInterface_->registerHardwareDeviceWithCodec(avCodecContext_.get());
-     deviceInterface_->setupHardwareFrameContextForEncoding(
-         avCodecContext_.get());
-@@ -1208,7 +1211,7 @@ void MultiStreamEncoder::initializeVideoStream() {
    if (videoStream.options.pixelFormat.has_value()) {
-     // TODO-MultiStreamEncoder: (P2) Enable pixel formats to be set by user on
-     // GPU and handled with the appropriate NPP function on GPU.
 -    if (deviceType == kStableCUDA) {
 +    if (deviceType == kStableCUDA || deviceType == kStableXPU) {
        STD_TORCH_CHECK(
            false,
            "Video encoding on GPU currently only supports the nv12 pixel format. "
-@@ -1217,7 +1220,7 @@ void MultiStreamEncoder::initializeVideoStream() {
+@@ -479,7 +479,7 @@ void MultiStreamEncoder::initializeVideoStream(VideoStream& videoStream) {
      outPixelFormat =
          validatePixelFormat(*avCodec, videoStream.options.pixelFormat.value());
    } else {
@@ -50,7 +31,7 @@ index 2fe136fb..d024834b 100644
        // Default to nv12 pixel format when encoding on GPU.
        outPixelFormat = DeviceInterface::CUDA_ENCODING_PIXEL_FORMAT;
      } else {
-@@ -1275,7 +1278,7 @@ void MultiStreamEncoder::initializeVideoStream() {
+@@ -537,7 +537,7 @@ void MultiStreamEncoder::initializeVideoStream(VideoStream& videoStream) {
          0);
    }
  
@@ -59,3 +40,5 @@ index 2fe136fb..d024834b 100644
      videoStream.deviceInterface->registerHardwareDeviceWithCodec(
          videoStream.avCodecContext.get());
      videoStream.deviceInterface->setupHardwareFrameContextForEncoding(
+-- 
+2.43.0
