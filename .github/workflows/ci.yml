@@ -20,6 +20,9 @@ on:
     branches:
       - main
       - 'release/**'
+  release:
+    types:
+      - published      
 
 permissions: read-all
 
@@ -297,10 +300,11 @@ jobs:
         fi
         pytest -rsf -k "${known_failures}" test/
 
-  # TODO: change this placeholder to the actual job publishing artifacts to PyPI
   publish:
     needs: [ compose, test-torchcodec ]
     runs-on: ubuntu-24.04
+    permissions:
+      id-token: write    
     env:
       WHEELS: torchlib-all-wheels
     steps:
@@ -311,4 +315,15 @@ jobs:
         path: _wheels
     - name: 'List wheels'
       run: |
-        ls _wheels
+        tree _wheels/
+    - name: 'Prepare wheels'
+      run: |
+        rm -rf _publish && mkdir _publish
+        cp ./_wheels/${{ env.WHEELS }}-${{ env.PR_OR_SHA }}-${{ env.UNIQUE_ID }}/torchcodec_xpu-*.whl _publish/
+        cp ./_wheels/${{ env.WHEELS }}-${{ env.PR_OR_SHA }}-${{ env.UNIQUE_ID }}/torchlib_xpu-*.whl _publish/
+        ls -al _publish/
+    - name: Publish package distributions to PyPI
+      if: github.event_name == 'release'
+      uses: pypa/gh-action-pypi-publish@release/v1
+      with:
+        packages-dir: _publish
