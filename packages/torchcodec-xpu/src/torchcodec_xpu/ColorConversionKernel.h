@@ -24,6 +24,24 @@ void convertNV12ToRGB(
     enum AVColorRange color_range,
     enum AVColorSpace colorspace);
 
+// Encoding: NCHW uint8 RGB tensor (on XPU) -> NV12 VAAPI surface.
+// is_tiled: true for Intel Tile-Y surfaces (drm_format_modifier != 0), false for linear.
+void convertRGBToNV12(
+    sycl::queue& queue,
+    const uint8_t* rgb_nchw,
+    int64_t ch_stride,
+    int64_t row_stride,
+    int64_t pixel_stride,
+    uint8_t* dst_y,
+    uint8_t* dst_uv,
+    int width,
+    int height,
+    int y_pitch,
+    int uv_pitch,
+    bool is_tiled,
+    enum AVColorRange color_range,
+    enum AVColorSpace colorspace);
+
 // Anchor function to force kernel registration
 void registerColorConversionKernel();
 
