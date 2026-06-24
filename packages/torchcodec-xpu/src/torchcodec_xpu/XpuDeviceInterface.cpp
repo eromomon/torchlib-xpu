@@ -631,6 +631,21 @@ std::optional<const AVCodec*> XpuDeviceInterface::findCodec(
 }
 
 // ============================================================
+// Encoding: getEncodingPixelFormat
+// ============================================================
+// XPU encoders (VAAPI) consume NV12. We reject any user-supplied pixel
+// format and force NV12 to match the VAAPI hw_frames_ctx sw_format below.
+AVPixelFormat XpuDeviceInterface::getEncodingPixelFormat(
+    [[maybe_unused]] const AVCodec& avCodec,
+    const std::optional<std::string>& userPixelFormat) const {
+  STD_TORCH_CHECK(
+      !userPixelFormat.has_value(),
+      "Video encoding on XPU currently only supports the nv12 pixel format. "
+      "Do not set pixel_format to use nv12 by default.");
+  return AV_PIX_FMT_NV12;
+}
+
+// ============================================================
 // Encoding: setupHardwareFrameContextForEncoding
 // ============================================================
 // Allocates a VAAPI hw_frames_ctx on the codec context so the encoder
