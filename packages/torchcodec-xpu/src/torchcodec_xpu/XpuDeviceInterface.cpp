@@ -30,7 +30,7 @@ namespace xpu {
 const char* USE_SYCL_KERNELS = std::getenv("USE_SYCL_KERNELS");
 const char* FORCE_CPU_FALLBACK = std::getenv("FORCE_CPU_FALLBACK");
 
-static bool g_xpu = registerDeviceInterface(
+static bool g_xpu = register_device_interface(
     DeviceInterfaceKey(StableDeviceType::XPU),
     [](const StableDevice& device) { return new XpuDeviceInterface(device); });
 
@@ -74,9 +74,9 @@ inline bool force_cpu_fallback() {
 }
 
 bool has_fp64(const StableDevice& device) {
-  int deviceIndex = getDeviceIndex(device);
-  sycl::device syclDevice = c10::xpu::get_raw_device(deviceIndex);
-  return syclDevice.has(sycl::aspect::fp64);
+  int device_index = get_device_index(device);
+  sycl::device sycl_device = c10::xpu::get_raw_device(device_index);
+  return sycl_device.has(sycl::aspect::fp64);
 }
 
 sycl::ext::oneapi::experimental::architecture getArchitecture(
@@ -89,11 +89,11 @@ sycl::ext::oneapi::experimental::architecture getArchitecture(
 // Resolves the VAAPI render-node path this XPU device should open.
 std::string resolveRenderD(const StableDevice& device) {
   std::string renderD = "/dev/dri/renderD128";
-  int deviceIndex = getDeviceIndex(device);
-  sycl::device syclDevice = c10::xpu::get_raw_device(deviceIndex);
-  if (syclDevice.has(sycl::aspect::ext_intel_pci_address)) {
+  int device_index = get_device_index(device);
+  sycl::device sycl_device = c10::xpu::get_raw_device(device_index);
+  if (sycl_device.has(sycl::aspect::ext_intel_pci_address)) {
     auto BDF =
-        syclDevice.get_info<sycl::ext::intel::info::device::pci_address>();
+        sycl_device.get_info<sycl::ext::intel::info::device::pci_address>();
     renderD = "/dev/dri/by-path/pci-" + BDF + "-render";
   }
   return renderD;
@@ -116,7 +116,7 @@ UniqueAVBufferRef getVaapiContext(const StableDevice& device) {
     TORCH_CHECK(
         false,
         "Failed to create specified HW device: ",
-        getFFMPEGErrorStringFromErrorCode(err));
+        get_ffmpeg_error_string_from_error_code(err));
   }
   return UniqueAVBufferRef(ctx);
 }
@@ -140,11 +140,11 @@ torch::stable::Tensor allocateEmptyHWCTensor(
 UniqueAVFrame allocNV12Frame(
     int width,
     int height,
-    int frameIndex,
-    AVCodecContext* codecContext) {
-  TORCH_CHECK(codecContext != nullptr, "codecContext is null");
+    int frame_index,
+    AVCodecContext* codec_context) {
+  TORCH_CHECK(codec_context != nullptr, "codec_context is null");
   TORCH_CHECK(
-      codecContext->hw_frames_ctx != nullptr,
+      codec_context->hw_frames_ctx != nullptr,
       "hw_frames_ctx is null: call setupHardwareFrameContextForEncoding first");
 
   UniqueAVFrame vaFrame(av_frame_alloc());
@@ -152,28 +152,28 @@ UniqueAVFrame allocNV12Frame(
   vaFrame->format = AV_PIX_FMT_VAAPI;
   vaFrame->width  = width;
   vaFrame->height = height;
-  vaFrame->pts    = frameIndex;
+  vaFrame->pts    = frame_index;
 
-  int ret = av_hwframe_get_buffer(codecContext->hw_frames_ctx, vaFrame.get(), 0);
+  int ret = av_hwframe_get_buffer(codec_context->hw_frames_ctx, vaFrame.get(), 0);
   TORCH_CHECK(
       ret >= 0,
       "av_hwframe_get_buffer failed: ",
-      getFFMPEGErrorStringFromErrorCode(ret));
+      get_ffmpeg_error_string_from_error_code(ret));
   return vaFrame;
 }
 
 } // namespace xpu
 
-int getDeviceIndex(const StableDevice& device) {
+int get_device_index(const StableDevice& device) {
   // PyTorch uses int8_t as its torch::DeviceIndex, but FFmpeg and XPU
   // libraries use int. So we use int, too.
-  int deviceIndex = static_cast<int>(device.index());
+  int device_index = static_cast<int>(device.index());
   TORCH_CHECK(
-      deviceIndex >= -1 && deviceIndex < xpu::MAX_XPU_GPUS,
+      device_index >= -1 && device_index < xpu::MAX_XPU_GPUS,
       "Invalid device index = ",
-      deviceIndex);
+      device_index);
 
-  return (deviceIndex == -1)? 0: deviceIndex;
+  return (device_index == -1)? 0: device_index;
 }
 
 XpuDeviceInterface::XpuDeviceInterface(const StableDevice& device)
@@ -212,44 +212,44 @@ XpuDeviceInterface::XpuDeviceInterface(const StableDevice& device)
 
 XpuDeviceInterface::~XpuDeviceInterface() {
   if (ctx_) {
-    xpu::g_cached_hw_device_ctxs.addIfCacheHasCapacity(device_, std::move(ctx_));
+    xpu::g_cached_hw_device_ctxs.add_if_cache_has_capacity(device_, std::move(ctx_));
   }
 }
 
-void XpuDeviceInterface::initialize(const SharedAVCodecContext& codecContext) {
-  codecContext_ = codecContext;
+void XpuDeviceInterface::initialize(const SharedAVCodecContext& codec_context) {
+  codec_context_ = codec_context;
 }
 
-void XpuDeviceInterface::initializeVideo(
-    const AVStream* avStream,
-    const UniqueDecodingAVFormatContext& avFormatCtx,
-    const VideoStreamOptions& videoStreamOptions,
+void XpuDeviceInterface::initialize_video(
+    const AVStream* av_stream,
+    const UniqueDecodingAVFormatContext& av_format_ctx,
+    const VideoStreamOptions& video_stream_options,
     [[maybe_unused]] const std::vector<std::unique_ptr<Transform>>& transforms,
-    [[maybe_unused]] const std::optional<FrameDims>& resizedOutputDims) {
-  TORCH_CHECK(avStream != nullptr, "avStream is null");
-  timeBase_ = avStream->time_base;
-  videoStreamOptions_ = videoStreamOptions;
+    [[maybe_unused]] const std::optional<FrameDims>& resized_output_dims) {
+  TORCH_CHECK(av_stream != nullptr, "av_stream is null");
+  time_base_ = av_stream->time_base;
+  video_stream_options_ = video_stream_options;
 
-  cpuInterface_ = createDeviceInterface(kStableCPU);
+  cpu_interface_ = create_device_interface(kStableCPU);
   STD_TORCH_CHECK(
-      cpuInterface_ != nullptr, "Failed to create CPU device interface");
-  cpuInterface_->initialize(codecContext_);
-  cpuInterface_->initializeVideo(
-      avStream,
-      avFormatCtx,
+      cpu_interface_ != nullptr, "Failed to create CPU device interface");
+  cpu_interface_->initialize(codec_context_);
+  cpu_interface_->initialize_video(
+      av_stream,
+      av_format_ctx,
       VideoStreamOptions(),
       {},
-      /*resizedOutputDims=*/std::nullopt);
+      /*resized_output_dims=*/std::nullopt);
 }
 
-void XpuDeviceInterface::registerHardwareDeviceWithCodec(
-    AVCodecContext* codecContext) {
+void XpuDeviceInterface::register_hardware_device_with_codec(
+    AVCodecContext* codec_context) {
   if (!ctx_) {
     VLOG(1) << "HW context not initialized, falling back to CPU";
     return;
   }
-  TORCH_CHECK(codecContext != nullptr, "codecContext is null");
-  codecContext->hw_device_ctx = av_buffer_ref(ctx_.get());
+  TORCH_CHECK(codec_context != nullptr, "codec_context is null");
+  codec_context->hw_device_ctx = av_buffer_ref(ctx_.get());
 }
 
 VADisplay getVaDisplayFromAV(AVFrame* avFrame) {
@@ -342,7 +342,7 @@ torch::stable::Tensor AVFrameToTensor(
   TORCH_CHECK(
       status >= 0,
       "Failed to reference AVFrame: ",
-      getFFMPEGErrorStringFromErrorCode(status));
+      get_ffmpeg_error_string_from_error_code(status));
 
   dl_dst->manager_ctx = context.release();
   dl_dst->deleter = deleter;
@@ -374,11 +374,11 @@ VADisplay getVaDisplayFromAV(UniqueAVFrame& avFrame) {
   return vactx->display;
 }
 
-void XpuDeviceInterface::convertAVFrameToFrameOutput(
-    UniqueAVFrame& avFrame,
-    FrameOutput& frameOutput,
-    std::optional<torch::stable::Tensor> preAllocatedOutputTensor) {
-  if (avFrame->format != AV_PIX_FMT_VAAPI) {
+void XpuDeviceInterface::convert_av_frame_to_frame_output(
+    UniqueAVFrame& av_frame,
+    FrameOutput& frame_output,
+    std::optional<torch::stable::Tensor> pre_allocated_output_tensor) {
+  if (av_frame->format != AV_PIX_FMT_VAAPI) {
     // The frame's format is AV_PIX_FMT_VAAPI if and only if its content is on
     // the GPU. In this branch, the frame is on the CPU. This is what FFmpeg VAAPI
     // decoder gives us if it wasn't able to decode a frame, for whatever reason.
@@ -387,28 +387,28 @@ void XpuDeviceInterface::convertAVFrameToFrameOutput(
     // CPU. We send the frame back to the XPU device when we're done.
 
     FrameOutput cpuFrameOutput;
-    cpuInterface_->convertAVFrameToFrameOutput(avFrame, cpuFrameOutput);
+    cpu_interface_->convert_av_frame_to_frame_output(av_frame, cpuFrameOutput);
 
     // Finally, we need to send the frame back to the GPU. Note that the
     // pre-allocated tensor is on the GPU, so we can't send that to the CPU
     // device interface. We copy it over here.
-    if (preAllocatedOutputTensor.has_value()) {
-      torch::stable::copy_(preAllocatedOutputTensor.value(), cpuFrameOutput.data);
-      frameOutput.data = preAllocatedOutputTensor.value();
+    if (pre_allocated_output_tensor.has_value()) {
+      torch::stable::copy_(pre_allocated_output_tensor.value(), cpuFrameOutput.data);
+      frame_output.data = pre_allocated_output_tensor.value();
     } else {
-      frameOutput.data = torch::stable::to(cpuFrameOutput.data, device_);
+      frame_output.data = torch::stable::to(cpuFrameOutput.data, device_);
     }
     return;
   }
 
   TORCH_CHECK(
-      avFrame->format == AV_PIX_FMT_VAAPI,
+      av_frame->format == AV_PIX_FMT_VAAPI,
       "Expected format to be AV_PIX_FMT_VAAPI, got " +
-          std::string(av_get_pix_fmt_name((AVPixelFormat)avFrame->format)));
-  auto frameDims = FrameDims(avFrame->height, avFrame->width);
-  torch::stable::Tensor& dst = frameOutput.data;
-  if (preAllocatedOutputTensor.has_value()) {
-    auto shape = preAllocatedOutputTensor.value().sizes();
+          std::string(av_get_pix_fmt_name((AVPixelFormat)av_frame->format)));
+  auto frameDims = FrameDims(av_frame->height, av_frame->width);
+  torch::stable::Tensor& dst = frame_output.data;
+  if (pre_allocated_output_tensor.has_value()) {
+    auto shape = pre_allocated_output_tensor.value().sizes();
     TORCH_CHECK(
         (shape.size() == 3) && (shape[0] == frameDims.height) &&
 	    (shape[1] == frameDims.width) && (shape[2] == 3),
@@ -417,8 +417,8 @@ void XpuDeviceInterface::convertAVFrameToFrameOutput(
         "x",
         frameDims.width,
         "x3, got ",
-        intArrayRefToString(shape));
-    dst = preAllocatedOutputTensor.value();
+        int_array_ref_to_string(shape));
+    dst = pre_allocated_output_tensor.value();
   } else {
     // Explicitly load the version defined in facebook::torchcodec::xpu
     // namespace as facebook::torchcodec defines the same but with the linkage
@@ -427,8 +427,8 @@ void XpuDeviceInterface::convertAVFrameToFrameOutput(
   }
 
   auto start = std::chrono::high_resolution_clock::now();
-  if (!convertAVFrameToFrameOutput_SYCL(avFrame, dst)) {
-    convertAVFrameToFrameOutput_FilterGraph(avFrame, dst);
+  if (!convert_av_frame_to_frame_output_sycl(av_frame, dst)) {
+    convert_av_frame_to_frame_output_filter_graph(av_frame, dst);
   }
 
   auto end = std::chrono::high_resolution_clock::now();
@@ -438,11 +438,11 @@ void XpuDeviceInterface::convertAVFrameToFrameOutput(
           << " took: " << duration.count() << "us" << std::endl;
 }
 
-void XpuDeviceInterface::convertAVFrameToFrameOutput_FilterGraph(
-    UniqueAVFrame& avFrame,
+void XpuDeviceInterface::convert_av_frame_to_frame_output_filter_graph(
+    UniqueAVFrame& av_frame,
     torch::stable::Tensor& dst) {
   VLOG(1) << "Using VAAPI filter graph backend for conversion";
-  auto frameDims = FrameDims(avFrame->height, avFrame->width);
+  auto frameDims = FrameDims(av_frame->height, av_frame->width);
 
   // We need to compare the current frame context with our previous frame
   // context. If they are different, then we need to re-create our colorspace
@@ -452,17 +452,17 @@ void XpuDeviceInterface::convertAVFrameToFrameOutput_FilterGraph(
   // resolution to change mid-stream. Finally, we want to reuse the colorspace
   // conversion objects as much as possible for performance reasons.
   enum AVPixelFormat frameFormat =
-      static_cast<enum AVPixelFormat>(avFrame->format);
+      static_cast<enum AVPixelFormat>(av_frame->format);
   FiltersConfig filtersConfig;
 
-  filtersConfig.inputWidth = avFrame->width;
-  filtersConfig.inputHeight = avFrame->height;
-  filtersConfig.inputFormat = frameFormat;
-  filtersConfig.inputAspectRatio = avFrame->sample_aspect_ratio;
+  filtersConfig.input_width = av_frame->width;
+  filtersConfig.input_height = av_frame->height;
+  filtersConfig.input_format = frameFormat;
+  filtersConfig.input_aspect_ratio = av_frame->sample_aspect_ratio;
   // Actual output color format will be set via filter options
-  filtersConfig.outputFormat = AV_PIX_FMT_VAAPI;
-  filtersConfig.timeBase = timeBase_;
-  filtersConfig.hwFramesCtx.reset(av_buffer_ref(avFrame->hw_frames_ctx));
+  filtersConfig.output_format = AV_PIX_FMT_VAAPI;
+  filtersConfig.time_base = time_base_;
+  filtersConfig.hw_frames_ctx.reset(av_buffer_ref(av_frame->hw_frames_ctx));
 
   std::stringstream filters;
   filters << "scale_vaapi=" << frameDims.width << ":" << frameDims.height;
@@ -470,17 +470,17 @@ void XpuDeviceInterface::convertAVFrameToFrameOutput_FilterGraph(
   // We are doing the same to match.
   filters << ":format=rgba:out_range=pc";
 
-  filtersConfig.filtergraphStr = filters.str();
+  filtersConfig.filtergraph_str = filters.str();
 
-  if (!filterGraph_ || prevFiltersConfig_ != filtersConfig) {
-    filterGraph_ =
-        std::make_unique<FilterGraph>(filtersConfig, videoStreamOptions_);
-    prevFiltersConfig_ = std::move(filtersConfig);
+  if (!filter_graph_ || prev_filters_config_ != filtersConfig) {
+    filter_graph_ =
+        std::make_unique<FilterGraph>(filtersConfig, video_stream_options_);
+    prev_filters_config_ = std::move(filtersConfig);
   }
 
   // We convert input to the RGBX color format with VAAPI getting WxHx4
   // tensor on the output.
-  UniqueAVFrame filteredAVFrame = filterGraph_->convert(avFrame);
+  UniqueAVFrame filteredAVFrame = filter_graph_->convert(av_frame);
 
   TORCH_CHECK_EQ(filteredAVFrame->format, AV_PIX_FMT_VAAPI);
 
@@ -488,7 +488,7 @@ void XpuDeviceInterface::convertAVFrameToFrameOutput_FilterGraph(
   torch::stable::copy_(dst, torch::stable::narrow(dst_rgb4, 2, 0, 3));
 }
 
-bool XpuDeviceInterface::convertAVFrameToFrameOutput_SYCL(
+bool XpuDeviceInterface::convert_av_frame_to_frame_output_sycl(
     [[maybe_unused]] UniqueAVFrame& frame,
     [[maybe_unused]] torch::stable::Tensor& dst) {
   bool converted = false;
@@ -571,16 +571,16 @@ bool XpuDeviceInterface::convertAVFrameToFrameOutput_SYCL(
 // we have to do this because of an FFmpeg bug where hardware decoding is not
 // appropriately set, so we just go off and find the matching codec for the XPU
 // device
-std::optional<const AVCodec*> XpuDeviceInterface::findCodec(
-    const AVCodecID& codecId,
-    bool isDecoder) {
+std::optional<const AVCodec*> XpuDeviceInterface::find_codec(
+    const AVCodecID& codec_id,
+    bool is_decoder) {
   // Look up the first codec (decoder or encoder) registered for `id` that
   // advertises a VAAPI hw_config.
-  auto findVaapiForId = [isDecoder](AVCodecID id) -> const AVCodec* {
+  auto findVaapiForId = [is_decoder](AVCodecID id) -> const AVCodec* {
     void* i = nullptr;
     const AVCodec* codec = nullptr;
     while ((codec = av_codec_iterate(&i)) != nullptr) {
-      if (isDecoder) {
+      if (is_decoder) {
         if (codec->id != id || !av_codec_is_decoder(codec)) {
           continue;
         }
@@ -602,25 +602,25 @@ std::optional<const AVCodec*> XpuDeviceInterface::findCodec(
   };
 
   // 1) Try the requested codec id first.
-  if (const AVCodec* c = findVaapiForId(codecId)) {
+  if (const AVCodec* c = findVaapiForId(codec_id)) {
     return c;
   }
 
   // 2) Encoder-only fallback: if no VAAPI encoder exists for codecId
   // (e.g. mp4's default MPEG4), substitute a HW-capable alternative so
   // avcodec_open2 doesn't fail on a SW or non-VAAPI HW encoder.
-  if (!isDecoder) {
+  if (!is_decoder) {
     static constexpr AVCodecID kHwEncoderFallbacks[] = {
         AV_CODEC_ID_H264,
         AV_CODEC_ID_HEVC,
         AV_CODEC_ID_AV1,
     };
     for (AVCodecID fb : kHwEncoderFallbacks) {
-      if (fb == codecId) {
+      if (fb == codec_id) {
         continue;
       }
       if (const AVCodec* c = findVaapiForId(fb)) {
-        VLOG(1) << "No VAAPI encoder for codec id " << codecId
+        VLOG(1) << "No VAAPI encoder for codec id " << codec_id
                 << ", substituting " << c->name;
         return c;
       }
@@ -635,11 +635,11 @@ std::optional<const AVCodec*> XpuDeviceInterface::findCodec(
 // ============================================================
 // XPU encoders (VAAPI) consume NV12. We reject any user-supplied pixel
 // format and force NV12 to match the VAAPI hw_frames_ctx sw_format below.
-AVPixelFormat XpuDeviceInterface::getEncodingPixelFormat(
-    [[maybe_unused]] const AVCodec& avCodec,
-    const std::optional<std::string>& userPixelFormat) const {
+AVPixelFormat XpuDeviceInterface::get_encoding_pixel_format(
+    [[maybe_unused]] const AVCodec& av_codec,
+    const std::optional<std::string>& user_pixel_format) const {
   STD_TORCH_CHECK(
-      !userPixelFormat.has_value(),
+      !user_pixel_format.has_value(),
       "Video encoding on XPU currently only supports the nv12 pixel format. "
       "Do not set pixel_format to use nv12 by default.");
   return AV_PIX_FMT_NV12;
@@ -650,14 +650,14 @@ AVPixelFormat XpuDeviceInterface::getEncodingPixelFormat(
 // ============================================================
 // Allocates a VAAPI hw_frames_ctx on the codec context so the encoder
 // can write directly into VAAPI surfaces (NV12 layout, VAAPI wrapper).
-void XpuDeviceInterface::setupHardwareFrameContextForEncoding(
-    AVCodecContext* codecContext) {
+void XpuDeviceInterface::setup_hardware_frame_context_for_encoding(
+    AVCodecContext* codec_context) {
   TORCH_CHECK(
       ctx_,
       "VAAPI hw device context is not initialized. "
       "This device may not have a media engine (e.g. PVC/Ponte Vecchio). "
       "Encoding via XPU is only supported on devices with VAAPI.");
-  TORCH_CHECK(codecContext != nullptr, "codecContext is null");
+  TORCH_CHECK(codec_context != nullptr, "codec_context is null");
 
   AVBufferRef* hwFramesCtxRef = av_hwframe_ctx_alloc(ctx_.get());
   TORCH_CHECK(
@@ -666,14 +666,14 @@ void XpuDeviceInterface::setupHardwareFrameContextForEncoding(
 
   // sw_pix_fmt: the software (CPU-accessible) format the encoder consumes inside the surface
   // pix_fmt:    the hardware wrapper format the codec sees (must match hw_frames_ctx->format)
-  codecContext->sw_pix_fmt = AV_PIX_FMT_NV12;
-  codecContext->pix_fmt    = AV_PIX_FMT_VAAPI;
+  codec_context->sw_pix_fmt = AV_PIX_FMT_NV12;
+  codec_context->pix_fmt    = AV_PIX_FMT_VAAPI;
 
   auto* hwFramesCtx = reinterpret_cast<AVHWFramesContext*>(hwFramesCtxRef->data);
   hwFramesCtx->format    = AV_PIX_FMT_VAAPI;
   hwFramesCtx->sw_format = AV_PIX_FMT_NV12;
-  hwFramesCtx->width     = codecContext->width;
-  hwFramesCtx->height    = codecContext->height;
+  hwFramesCtx->width     = codec_context->width;
+  hwFramesCtx->height    = codec_context->height;
 
   int ret = av_hwframe_ctx_init(hwFramesCtxRef);
   if (ret < 0) {
@@ -681,49 +681,49 @@ void XpuDeviceInterface::setupHardwareFrameContextForEncoding(
     TORCH_CHECK(
         false,
         "Failed to initialize VAAPI hw frames context: ",
-        getFFMPEGErrorStringFromErrorCode(ret));
+        get_ffmpeg_error_string_from_error_code(ret));
   }
-  codecContext->hw_frames_ctx = hwFramesCtxRef;
+  codec_context->hw_frames_ctx = hwFramesCtxRef;
 }
 
 // ============================================================
 // Encoding: convertTensorToAVFrameForEncoding
 // ============================================================
-UniqueAVFrame XpuDeviceInterface::convertTensorToAVFrameForEncoding(
+UniqueAVFrame XpuDeviceInterface::convert_tensor_to_av_frame_for_encoding(
     const torch::stable::Tensor& tensor,
-    int frameIndex,
-    AVCodecContext* codecContext) {
+    int frame_index,
+    AVCodecContext* codec_context) {
   TORCH_CHECK(
       tensor.dim() == 3 && tensor.sizes()[0] == 3,
       "Expected CHW tensor with 3 channels (RGB), got shape: ",
       tensor.sizes()[0], "x", tensor.sizes()[1], "x", tensor.sizes()[2]);
-  TORCH_CHECK(codecContext != nullptr, "codecContext is null");
+  TORCH_CHECK(codec_context != nullptr, "codec_context is null");
   TORCH_CHECK(
-      codecContext->hw_frames_ctx != nullptr,
+      codec_context->hw_frames_ctx != nullptr,
       "hw_frames_ctx is null: call setupHardwareFrameContextForEncoding first");
 
   // Try the optimized SYCL path first. It returns a null UniqueAVFrame when
   // SYCL is unavailable (USE_SYCL_KERNELS disabled, no FP64 support, or built
   // without WITH_SYCL_KERNELS). In that case, fall back to the CPU path.
   UniqueAVFrame avFrame =
-      convertTensorToAVFrameForEncoding_SYCL(tensor, frameIndex, codecContext);
+      convert_tensor_to_av_frame_for_encoding_sycl(tensor, frame_index, codec_context);
   if (avFrame) {
-    VLOG(9) << "[XPU Encoder] Encoding frame " << frameIndex
+    VLOG(9) << "[XPU Encoder] Encoding frame " << frame_index
             << " via SYCL on device=xpu:" << device_.index();
     return avFrame;
   }
 
-  VLOG(9) << "[XPU Encoder] Encoding frame " << frameIndex << " via CPU fallback";
-  return convertTensorToAVFrameForEncoding_CPU(tensor, frameIndex, codecContext);
+  VLOG(9) << "[XPU Encoder] Encoding frame " << frame_index << " via CPU fallback";
+  return convert_tensor_to_av_frame_for_encoding_cpu(tensor, frame_index, codec_context);
 }
 
 // ============================================================
 // Encoding: convertTensorToAVFrameForEncoding_SYCL
 // ============================================================
-UniqueAVFrame XpuDeviceInterface::convertTensorToAVFrameForEncoding_SYCL(
+UniqueAVFrame XpuDeviceInterface::convert_tensor_to_av_frame_for_encoding_sycl(
     [[maybe_unused]] const torch::stable::Tensor& tensor,
-    [[maybe_unused]] int frameIndex,
-    [[maybe_unused]] AVCodecContext* codecContext) {
+    [[maybe_unused]] int frame_index,
+    [[maybe_unused]] AVCodecContext* codec_context) {
   if (!xpu::use_sycl_color_conversion_kernel()) {
     return UniqueAVFrame();
   }
@@ -735,7 +735,7 @@ UniqueAVFrame XpuDeviceInterface::convertTensorToAVFrameForEncoding_SYCL(
 #ifdef WITH_SYCL_KERNELS
   const int width  = static_cast<int>(tensor.sizes()[2]);
   const int height = static_cast<int>(tensor.sizes()[1]);
-  vaFrame = xpu::allocNV12Frame(width, height, frameIndex, codecContext);
+  vaFrame = xpu::allocNV12Frame(width, height, frame_index, codec_context);
 
   VADisplay display = getVaDisplayFromAV(vaFrame.get());
   VASurfaceID surfaceId = (VASurfaceID)(uintptr_t)vaFrame->data[3];
@@ -822,14 +822,14 @@ UniqueAVFrame XpuDeviceInterface::convertTensorToAVFrameForEncoding_SYCL(
       y_pitch,
       uv_pitch,
       is_tiled,
-      codecContext->color_range,
-      codecContext->colorspace);
+      codec_context->color_range,
+      codec_context->colorspace);
 
   zeMemFree(zeCtx, usm_ptr);
   close(desc.objects[0].fd);
 
-  vaFrame->colorspace  = codecContext->colorspace;
-  vaFrame->color_range = codecContext->color_range;
+  vaFrame->colorspace  = codec_context->colorspace;
+  vaFrame->color_range = codec_context->color_range;
 #endif
   return vaFrame;
 }
@@ -837,14 +837,14 @@ UniqueAVFrame XpuDeviceInterface::convertTensorToAVFrameForEncoding_SYCL(
 // ============================================================
 // Encoding: convertTensorToAVFrameForEncoding_CPU  (CPU fallback)
 // ============================================================
-UniqueAVFrame XpuDeviceInterface::convertTensorToAVFrameForEncoding_CPU(
+UniqueAVFrame XpuDeviceInterface::convert_tensor_to_av_frame_for_encoding_cpu(
     const torch::stable::Tensor& tensor,
-    int frameIndex,
-    AVCodecContext* codecContext) {
+    int frame_index,
+    AVCodecContext* codec_context) {
   const int width  = static_cast<int>(tensor.sizes()[2]);
   const int height = static_cast<int>(tensor.sizes()[1]);
   UniqueAVFrame vaFrame =
-      xpu::allocNV12Frame(width, height, frameIndex, codecContext);
+      xpu::allocNV12Frame(width, height, frame_index, codec_context);
 
   // Move XPU tensor to CPU (blocking)
   torch::stable::Tensor cpuTensor =
@@ -863,7 +863,7 @@ UniqueAVFrame XpuDeviceInterface::convertTensorToAVFrameForEncoding_CPU(
   cpuFrame->height = vaFrame->height;
   int ret = av_frame_get_buffer(cpuFrame.get(), 0);
   TORCH_CHECK(ret >= 0, "av_frame_get_buffer (NV12) failed: ",
-              getFFMPEGErrorStringFromErrorCode(ret));
+              get_ffmpeg_error_string_from_error_code(ret));
 
   // Zero-copy GBRP view of the NCHW tensor (GBRP plane order: G=ch1, B=ch2, R=ch0).
   UniqueAVFrame gbrpFrame(av_frame_alloc());
@@ -899,10 +899,10 @@ UniqueAVFrame XpuDeviceInterface::convertTensorToAVFrameForEncoding_CPU(
   TORCH_CHECK(
       ret >= 0,
       "av_hwframe_transfer_data (NV12->VAAPI) failed: ",
-      getFFMPEGErrorStringFromErrorCode(ret));
+      get_ffmpeg_error_string_from_error_code(ret));
 
-  vaFrame->colorspace  = codecContext->colorspace;
-  vaFrame->color_range = codecContext->color_range;
+  vaFrame->colorspace  = codec_context->colorspace;
+  vaFrame->color_range = codec_context->color_range;
   return vaFrame;
 }
 
