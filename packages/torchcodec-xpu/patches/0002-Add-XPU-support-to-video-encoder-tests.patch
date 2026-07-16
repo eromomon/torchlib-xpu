@@ -15,6 +15,14 @@ Because torchcodec's Encoder.cpp performs an exact device-equality check
 `device="xpu"` to `f"xpu:{torch.xpu.current_device()}"` so the encoder
 and the input frames end up on the same fully-qualified device.
 
+Additionally, `test_write_frames_different_devices_errors` opens an XPU
+encoder that would otherwise be destroyed without ever receiving a frame.
+libavcodec's h264_vaapi encoder segfaults on the flush signal
+(`avcodec_send_frame(codec, NULL)`) when no frame was previously encoded,
+so on XPU we prime the encoder with one valid frame and close it
+explicitly before the test function returns. NVENC tolerates the empty
+flush; VAAPI does not.
+
 Depends on 0001-Add-XPU-support-to-tests.patch (defines the needs_xpu
 marker and imports torchcodec_xpu in test/utils.py).
 
@@ -119,7 +127,7 @@ diff --git a/test/test_encoders.py b/test/test_encoders.py
          enc, _, open_kwargs = self._create_encoder(method, tmp_path, "mp4")
          video = enc.add_video(height=256, width=256, frame_rate=30.0, device=device)
          self._open_encoder(enc, open_kwargs)
-@@ -395,41 +421,43 @@ class TestEncoder:
+@@ -395,41 +421,50 @@ class TestEncoder:
          with pytest.raises(RuntimeError, match="same dimensions"):
              video.add_frames(frames_512)
  
@@ -158,6 +166,13 @@ diff --git a/test/test_encoders.py b/test/test_encoders.py
          self._open_encoder(enc, open_kwargs)
          with pytest.raises(RuntimeError, match="same device"):
              video.add_frames(cpu_frames)
++        # Prime the accelerator encoder with one valid frame and close it
++        # explicitly. Without this, VAAPI's flush path (invoked from
++        # ~MultiStreamEncoder -> close -> flush_buffers -> avcodec_send_frame)
++        # segfaults inside libavcodec when asked to flush an h264_vaapi encoder
++        # that never received a single frame.
++        video.add_frames(cpu_frames.to(device))
++        enc.close()
  
 -    @needs_cuda
      @pytest.mark.parametrize("method", ("to_file", "to_file_like"))
