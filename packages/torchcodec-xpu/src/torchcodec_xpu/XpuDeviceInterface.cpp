@@ -712,6 +712,21 @@ void XpuDeviceInterface::setup_hardware_frame_context_for_encoding(
       codec_context->color_trc = AVCOL_TRC_BT709;
   }
 
+  // Force non-LP VAAPI engine for better quality under async_depth=1;
+  // caller-supplied low_power via extra_options overrides this later.
+  if (codec_context->priv_data != nullptr) {
+      av_opt_set(codec_context->priv_data, "low_power", "0",
+                 AV_OPT_SEARCH_CHILDREN);
+      // `quality=1` selects the highest-quality preset on VAAPI codecs that
+      // expose it. av_opt_set is silent on codecs that don't, so it's safe.
+      av_opt_set(codec_context->priv_data, "quality", "1",
+                 AV_OPT_SEARCH_CHILDREN);
+  }
+
+  // Disable B-frames (mirrors CUDA/NVENC delay=0) to avoid reorder issues
+  // with fragmented containers; callers can restore via extra_options={"bf":"2"}.
+  codec_context->max_b_frames = 0;
+
   int ret = av_hwframe_ctx_init(hwFramesCtxRef);
   if (ret < 0) {
     av_buffer_unref(&hwFramesCtxRef);
