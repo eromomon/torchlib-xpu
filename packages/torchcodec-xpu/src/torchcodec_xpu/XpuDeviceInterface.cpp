@@ -697,6 +697,21 @@ void XpuDeviceInterface::setup_hardware_frame_context_for_encoding(
   hwFramesCtx->width     = codec_context->width;
   hwFramesCtx->height    = codec_context->height;
 
+  // XPU quality is matterially better when using BT.709 color space and full range
+  // (JPEG) for encoding.
+  if (codec_context->color_range == AVCOL_RANGE_UNSPECIFIED) {
+      codec_context->color_range = AVCOL_RANGE_JPEG;
+  }
+  if (codec_context->colorspace == AVCOL_SPC_UNSPECIFIED) {
+      codec_context->colorspace = AVCOL_SPC_BT709;
+  }
+  if (codec_context->color_primaries == AVCOL_PRI_UNSPECIFIED) {
+      codec_context->color_primaries = AVCOL_PRI_BT709;
+  }
+  if (codec_context->color_trc == AVCOL_TRC_UNSPECIFIED) {
+      codec_context->color_trc = AVCOL_TRC_BT709;
+  }
+
   int ret = av_hwframe_ctx_init(hwFramesCtxRef);
   if (ret < 0) {
     av_buffer_unref(&hwFramesCtxRef);
