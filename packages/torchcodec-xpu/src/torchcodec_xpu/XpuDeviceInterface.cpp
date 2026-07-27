@@ -623,14 +623,13 @@ std::optional<const AVCodec*> XpuDeviceInterface::find_codec(
     return nullptr;
   };
 
-  // 1) Try the requested codec id first.
+  // Try the requested codec id first.
   if (const AVCodec* c = findVaapiForId(codec_id)) {
     return c;
   }
 
-  // 2) Encoder-only fallback: if no VAAPI encoder exists for codecId
-  // (e.g. mp4's default MPEG4), substitute a HW-capable alternative so
-  // avcodec_open2 doesn't fail on a SW or non-VAAPI HW encoder.
+  // Encoder-only fallback: if no VAAPI encoder exists for codecId
+  // substitute a HW-capable alternative 
   if (!is_decoder) {
     static constexpr AVCodecID kHwEncoderFallbacks[] = {
         AV_CODEC_ID_H264,

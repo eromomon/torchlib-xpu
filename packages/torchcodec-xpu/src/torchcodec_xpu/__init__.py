@@ -2,7 +2,6 @@
 # Copyright (c) 2025 Dmitry Rogozhkin.
 # Copyright (c) 2026 Intel Corporation. All Rights Reserved.
 
-import atexit
 import ctypes
 import importlib
 import traceback
