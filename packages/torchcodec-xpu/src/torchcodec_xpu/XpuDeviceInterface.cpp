@@ -163,27 +163,6 @@ UniqueAVFrame allocNV12Frame(
   return vaFrame;
 }
 
-// Drains the global VAAPI hwdevice cache. Must be called from Python at
-// interpreter shutdown (via atexit) so that av_buffer_unref() -> vaTerminate()
-// runs while the SYCL / Level Zero / UR runtimes are still alive. Letting the
-// C++ static destructor of g_cached_hw_device_ctxs run at process exit gives
-// undefined ordering vs torch's XPU teardown and typically segfaults inside
-// libva / iHD_drv_video.so on Intel Arc / Battlemage.
-void drain_cached_hw_device_ctxs() noexcept {
-  for (int i = 0; i < MAX_XPU_GPUS; ++i) {
-    try {
-      StableDevice device(kStableXPU, i);
-      // Each pop returns a unique_ptr; when it goes out of scope at the end
-      // of the loop iteration, its custom deleter calls av_buffer_unref().
-      while (auto ctx = g_cached_hw_device_ctxs.get(device)) {
-        (void)ctx;
-      }
-    } catch (...) {
-      // Called from atexit; must never throw across the C ABI boundary.
-    }
-  }
-}
-
 } // namespace xpu
 
 int get_device_index(const StableDevice& device) {
@@ -958,11 +937,3 @@ UniqueAVFrame XpuDeviceInterface::convert_tensor_to_av_frame_for_encoding_cpu(
 }
 
 } // namespace facebook::torchcodec
-
-// C-ABI shutdown entry point. Discovered from Python via ctypes and registered
-// with atexit so it runs BEFORE torch's own XPU teardown handlers. See
-// facebook::torchcodec::xpu::drain_cached_hw_device_ctxs() for details.
-extern "C" __attribute__((visibility("default")))
-void torchcodec_xpu_shutdown() {
-  facebook::torchcodec::xpu::drain_cached_hw_device_ctxs();
-}
