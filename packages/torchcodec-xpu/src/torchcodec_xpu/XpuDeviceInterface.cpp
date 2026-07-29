@@ -609,7 +609,7 @@ std::optional<const AVCodec*> XpuDeviceInterface::find_codec(
 
   // Encoder-only fallback: if no VAAPI encoder exists for codecId
   // substitute a HW-capable alternative 
-  if (!is_decoder) {
+   if (!is_decoder) {
     static constexpr AVCodecID kHwEncoderFallbacks[] = {
         AV_CODEC_ID_H264,
         AV_CODEC_ID_HEVC,
@@ -675,7 +675,7 @@ void XpuDeviceInterface::setup_hardware_frame_context_for_encoding(
   hwFramesCtx->width     = codec_context->width;
   hwFramesCtx->height    = codec_context->height;
 
-  // XPU quality is matterially better when using BT.709 color space and full range
+  // XPU quality is materially better when using BT.709 color space and full range
   // (JPEG) for encoding.
   if (codec_context->color_range == AVCOL_RANGE_UNSPECIFIED) {
       codec_context->color_range = AVCOL_RANGE_JPEG;
@@ -701,8 +701,8 @@ void XpuDeviceInterface::setup_hardware_frame_context_for_encoding(
                  AV_OPT_SEARCH_CHILDREN);
   }
 
-  // Disable B-frames (mirrors CUDA/NVENC delay=0) to avoid reorder issues
-  // with fragmented containers; callers can restore via extra_options={"bf":"2"}.
+  // Disable B-frames (mirrors CUDA/NVENC delay=0) to avoid frames reordering.
+  // Callers can restore via extra_options={"bf": "2"}.
   codec_context->max_b_frames = 0;
 
   int ret = av_hwframe_ctx_init(hwFramesCtxRef);
@@ -725,8 +725,21 @@ UniqueAVFrame XpuDeviceInterface::convert_tensor_to_av_frame_for_encoding(
     AVCodecContext* codec_context) {
   TORCH_CHECK(
       tensor.dim() == 3 && tensor.sizes()[0] == 3,
-      "Expected CHW tensor with 3 channels (RGB), got shape: ",
-      tensor.sizes()[0], "x", tensor.sizes()[1], "x", tensor.sizes()[2]);
+      "Expected 3D RGB tensor (CHW format), got ",
+      tensor.dim(),
+      "D tensor");
+  TORCH_CHECK(
+      tensor.device().type() == kStableXPU,
+      "Expected tensor on XPU device, got: ",
+      device_type_name(tensor.device().type()));
+  const int width = static_cast<int>(tensor.sizes()[2]);
+  const int height = static_cast<int>(tensor.sizes()[1]);
+  TORCH_CHECK(
+      (width % 2) == 0 && (height % 2) == 0,
+      "NV12 encoding requires even width/height, got ",
+      width,
+      "x",
+      height);
   TORCH_CHECK(codec_context != nullptr, "codec_context is null");
   TORCH_CHECK(
       codec_context->hw_frames_ctx != nullptr,
@@ -816,10 +829,14 @@ UniqueAVFrame XpuDeviceInterface::convert_tensor_to_av_frame_for_encoding_sycl(
   void* usm_ptr = nullptr;
   ze_result_t res = zeMemAllocDevice(
       zeCtx, &alloc_desc, desc.objects[0].size, 0, zeDevice, &usm_ptr);
-  TORCH_CHECK(
-      res == ZE_RESULT_SUCCESS,
-      "zeMemAllocDevice failed importing encode surface fd=",
-      desc.objects[0].fd);
+
+  if (res != ZE_RESULT_SUCCESS) {
+    close(desc.objects[0].fd);
+    TORCH_CHECK(
+        false,
+        "zeMemAllocDevice failed importing encode surface fd=",
+        desc.objects[0].fd);
+   }
 
   // Extract Y and UV plane pointers and pitches for both layouts
   uint8_t* y_ptr;
@@ -914,7 +931,7 @@ UniqueAVFrame XpuDeviceInterface::convert_tensor_to_av_frame_for_encoding_cpu(
       vaFrame->width, vaFrame->height, AV_PIX_FMT_NV12,
       SWS_BILINEAR, nullptr, nullptr, nullptr);
   TORCH_CHECK(swsCtx != nullptr, "sws_getContext(GBRP->NV12) failed");
-  sws_scale(
+  int sws_ret = sws_scale(
       swsCtx,
       gbrpFrame->data,
       gbrpFrame->linesize,
@@ -923,6 +940,14 @@ UniqueAVFrame XpuDeviceInterface::convert_tensor_to_av_frame_for_encoding_cpu(
       cpuFrame->data,
       cpuFrame->linesize);
   sws_freeContext(swsCtx);
+  TORCH_CHECK(
+      sws_ret >= 0,
+      "sws_scale(GBRP->NV12) failed: expected ",
+      get_ffmpeg_error_string_from_error_code(sws_ret))
+  TORCH_CHECK(
+      sws_ret == vaFrame->height,
+      "sws_scale(GBRP->NV12) failed: expected ", sws_ret,
+      "output lines, expected", vaFrame->height);
 
   // Upload CPU NV12 -> VAAPI surface
   ret = av_hwframe_transfer_data(vaFrame.get(), cpuFrame.get(), 0);

@@ -28,20 +28,13 @@ marker and imports torchcodec_xpu in test/utils.py).
 
 Signed-off-by: Edgar Romo Montiel <edgar.romo.montiel@intel.com>
 ---
- test/test_encoders.py | 82 ++++++++++++++++++++++++++++++++++++---------------
- 1 file changed, 58 insertions(+), 24 deletions(-)
+ test/test_encoders.py | 79 +++++++++++++++++++++++++++++++++++---------------
+ 1 file changed, 55 insertions(+), 24 deletions(-)
 
 diff --git a/test/test_encoders.py b/test/test_encoders.py
 --- a/test/test_encoders.py
 +++ b/test/test_encoders.py
-@@ -1,3 +1,6 @@
-+import torchcodec
-+import torchcodec_xpu
-+
- import io
- import os
- import platform
-@@ -25,6 +28,7 @@ from .utils import (
+@@ -25,6 +25,7 @@ from .utils import (
      NASA_AUDIO_MP3_44100,
      NASA_VIDEO,
      needs_cuda,
@@ -49,7 +42,7 @@ diff --git a/test/test_encoders.py b/test/test_encoders.py
      needs_ffmpeg_cli,
      psnr,
      SINE_MONO_S32,
-@@ -194,11 +198,23 @@ class TestEncoder:
+@@ -194,11 +195,23 @@ class TestEncoder:
          pytest.param(
              "cuda",
              marks=[
@@ -73,7 +66,7 @@ diff --git a/test/test_encoders.py b/test/test_encoders.py
  
      @staticmethod
      def _create_encoder(method, tmp_path, format):
-@@ -254,10 +270,12 @@ class TestEncoder:
+@@ -254,10 +267,12 @@ class TestEncoder:
      def test_add_video_and_encode_frames(self, tmp_path, format, method, device):
 +        if device == "xpu":
 +            device = f"xpu:{torch.xpu.current_device()}"
@@ -87,7 +80,7 @@ diff --git a/test/test_encoders.py b/test/test_encoders.py
  
          enc, encoder_output, open_kwargs = self._create_encoder(
              method, tmp_path, format
-@@ -314,10 +332,12 @@ class TestEncoder:
+@@ -314,10 +329,12 @@ class TestEncoder:
      def test_fragmented_mp4(self, format, tmp_path, method, device):
 +        if device == "xpu":
 +            device = f"xpu:{torch.xpu.current_device()}"
@@ -101,7 +94,7 @@ diff --git a/test/test_encoders.py b/test/test_encoders.py
  
          enc, encoder_output, open_kwargs = self._create_encoder(
              method, tmp_path, format
-@@ -333,9 +353,13 @@ class TestEncoder:
+@@ -333,9 +350,13 @@ class TestEncoder:
              "flush_packets": "1",
              "threads": "1",
          }
@@ -117,7 +110,7 @@ diff --git a/test/test_encoders.py b/test/test_encoders.py
          else:
              extra_options["tune"] = "zerolatency"
              pixel_format, crf = "yuv444p", 0
-@@ -374,7 +398,9 @@ class TestEncoder:
+@@ -374,7 +395,9 @@ class TestEncoder:
  
      @pytest.mark.parametrize("method", ("to_file", "to_file_like"))
      @pytest.mark.parametrize("device", cpu_and_oss_cuda)
@@ -127,7 +120,7 @@ diff --git a/test/test_encoders.py b/test/test_encoders.py
          enc, _, open_kwargs = self._create_encoder(method, tmp_path, "mp4")
          video = enc.add_video(height=256, width=256, frame_rate=30.0, device=device)
          self._open_encoder(enc, open_kwargs)
-@@ -395,41 +421,50 @@ class TestEncoder:
+@@ -395,41 +418,50 @@ class TestEncoder:
          with pytest.raises(RuntimeError, match="same dimensions"):
              video.add_frames(frames_512)
  
