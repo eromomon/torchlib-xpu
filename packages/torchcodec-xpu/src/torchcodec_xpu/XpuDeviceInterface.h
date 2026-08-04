@@ -51,9 +51,9 @@ class XpuDeviceInterface : public DeviceInterface {
       AVCodecContext* codec_context) override;
 
  private:
-  // We sometimes encounter frames that cannot be decoded on the XPU device.
-  // Rather than erroring out, we decode them on the CPU.
+  // CPU fallback interface. Used when frames cannot be handled on XPU
   std::unique_ptr<DeviceInterface> cpu_interface_;
+  DeviceInterface* ensure_cpu_interface();
 
   VideoStreamOptions video_stream_options_;
   AVRational time_base_;

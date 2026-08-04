@@ -221,6 +221,18 @@ void XpuDeviceInterface::initialize(const SharedAVCodecContext& codec_context) {
   codec_context_ = codec_context;
 }
 
+DeviceInterface* XpuDeviceInterface::ensure_cpu_interface() {
+  if (!cpu_interface_) {
+    cpu_interface_ = create_device_interface(kStableCPU);
+    STD_TORCH_CHECK(
+        cpu_interface_ != nullptr, "Failed to create CPU device interface");
+    if (codec_context_) {
+      cpu_interface_->initialize(codec_context_);
+    }
+  }
+  return cpu_interface_.get();
+}
+
 void XpuDeviceInterface::initialize_video(
     const AVStream* av_stream,
     const UniqueDecodingAVFormatContext& av_format_ctx,
@@ -231,10 +243,7 @@ void XpuDeviceInterface::initialize_video(
   time_base_ = av_stream->time_base;
   video_stream_options_ = video_stream_options;
 
-  cpu_interface_ = create_device_interface(kStableCPU);
-  STD_TORCH_CHECK(
-      cpu_interface_ != nullptr, "Failed to create CPU device interface");
-  cpu_interface_->initialize(codec_context_);
+  ensure_cpu_interface();
   cpu_interface_->initialize_video(
       av_stream,
       av_format_ctx,
@@ -246,7 +255,8 @@ void XpuDeviceInterface::initialize_video(
 void XpuDeviceInterface::register_hardware_device_with_codec(
     AVCodecContext* codec_context) {
   if (!ctx_) {
-    VLOG(1) << "HW context not initialized, falling back to CPU";
+    VLOG(1) << "No VAAPI context; preparing CPU fallback interface.";
+    ensure_cpu_interface();
     return;
   }
   TORCH_CHECK(codec_context != nullptr, "codec_context is null");
@@ -575,8 +585,13 @@ bool XpuDeviceInterface::convert_av_frame_to_frame_output_with_sycl(
 std::optional<const AVCodec*> XpuDeviceInterface::find_codec(
     const AVCodecID& codec_id,
     bool is_decoder) {
-  // Look up the first codec (decoder or encoder) registered for `id` that
-  // advertises a VAAPI hw_config.
+  if (!ctx_) {
+    VLOG(1) << "No VAAPI context; deferring to software "
+            << (is_decoder ? "decoder" : "encoder")
+            << " for codec_id=" << codec_id;
+    return std::nullopt;
+  }
+
   auto findVaapiForId = [is_decoder](AVCodecID id) -> const AVCodec* {
   void* i = nullptr;
   const AVCodec* codec = nullptr;
@@ -615,13 +630,11 @@ std::optional<const AVCodec*> XpuDeviceInterface::find_codec(
         AV_CODEC_ID_HEVC,
         AV_CODEC_ID_AV1,
     };
+
     for (AVCodecID fb : kHwEncoderFallbacks) {
-      if (fb == codec_id) {
-        continue;
-      }
       if (const AVCodec* c = findVaapiForId(fb)) {
-        VLOG(1) << "No VAAPI encoder for codec id " << codec_id
-                << ", substituting " << c->name;
+        VLOG(1) << "No VAAPI encoder for codec_id=" << codec_id
+                << "; substituting with " << c->name;
         return c;
       }
     }
@@ -633,11 +646,16 @@ std::optional<const AVCodec*> XpuDeviceInterface::find_codec(
 // ============================================================
 // Encoding: getEncodingPixelFormat
 // ============================================================
-// XPU encoders (VAAPI) consume NV12. We reject any user-supplied pixel
-// format and force NV12 to match the VAAPI hw_frames_ctx sw_format below.
+// On the VAAPI path, XPU encoders consume NV12; user-supplied pixel_format
+// is rejected. On the CPU fallback path, defer to the CPU device interface.
 AVPixelFormat XpuDeviceInterface::get_encoding_pixel_format(
-    [[maybe_unused]] const AVCodec& av_codec,
+    const AVCodec& av_codec,
     const std::optional<std::string>& user_pixel_format) const {
+  if (!ctx_) {
+    return cpu_interface_
+        ? cpu_interface_->get_encoding_pixel_format(av_codec, user_pixel_format)
+        : AV_PIX_FMT_YUV420P;
+  }
   STD_TORCH_CHECK(
       !user_pixel_format.has_value(),
       "Video encoding on XPU currently only supports the nv12 pixel format. "
@@ -648,15 +666,14 @@ AVPixelFormat XpuDeviceInterface::get_encoding_pixel_format(
 // ============================================================
 // Encoding: setupHardwareFrameContextForEncoding
 // ============================================================
-// Allocates a VAAPI hw_frames_ctx on the codec context so the encoder
-// can write directly into VAAPI surfaces (NV12 layout, VAAPI wrapper).
+// On the VAAPI path, the encoder can write directly into VAAPI surfaces (NV12 layout).
+// On the CPU fallback path, the SW encoder consumes plain CPU AVFrames.
 void XpuDeviceInterface::setup_hardware_frame_context_for_encoding(
     AVCodecContext* codec_context) {
-  TORCH_CHECK(
-      ctx_,
-      "VAAPI hw device context is not initialized. "
-      "This device may not have a media engine (e.g. PVC/Ponte Vecchio). "
-      "Encoding via XPU is only supported on devices with VAAPI.");
+  if (!ctx_) {
+    VLOG(1) << "No VAAPI context; skipping hw_frames_ctx setup (SW encoding).";
+    return;
+  }
   TORCH_CHECK(codec_context != nullptr, "codec_context is null");
 
   AVBufferRef* hwFramesCtxRef = av_hwframe_ctx_alloc(ctx_.get());
@@ -741,6 +758,18 @@ UniqueAVFrame XpuDeviceInterface::convert_tensor_to_av_frame_for_encoding(
       "x",
       height);
   TORCH_CHECK(codec_context != nullptr, "codec_context is null");
+
+  // No VAAPI context: copy tensor to CPU and delegate to CpuDeviceInterface.
+  if (!ctx_) {
+    auto* cpu = ensure_cpu_interface();
+    auto cpu_tensor = torch::stable::empty(
+        {tensor.sizes()[0], tensor.sizes()[1], tensor.sizes()[2]},
+        kStableUInt8, std::nullopt, StableDevice(kStableCPU));
+    torch::stable::copy_(cpu_tensor, tensor);
+    return cpu->convert_tensor_to_av_frame_for_encoding(
+        cpu_tensor, frame_index, codec_context);
+  }
+
   TORCH_CHECK(
       codec_context->hw_frames_ctx != nullptr,
       "hw_frames_ctx is null: call setupHardwareFrameContextForEncoding first");
