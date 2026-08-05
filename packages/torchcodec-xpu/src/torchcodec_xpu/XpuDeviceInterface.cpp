@@ -633,61 +633,37 @@ bool XpuDeviceInterface::convert_av_frame_to_frame_output_with_sycl(
 std::optional<const AVCodec*> XpuDeviceInterface::find_codec(
     const AVCodecID& codec_id,
     bool is_decoder) {
+  DEBUG_LOG(xpu::INFO, "Looking for " << avcodec_get_name(codec_id)
+    << (is_decoder ? " VAAPI decoder" : " VAAPI encoder"));
   if (!ctx_) {
-    DEBUG_LOG(xpu::INFO, "No VAAPI context; deferring to software "
-            << (is_decoder ? "decoder" : "encoder")
-            << " for codec_id=" << codec_id);
+    DEBUG_LOG(xpu::INFO, "No VAAPI context: deferring to software codec");
     return std::nullopt;
   }
 
-  auto findVaapiForId = [is_decoder](AVCodecID id) -> const AVCodec* {
   void* i = nullptr;
   const AVCodec* codec = nullptr;
   while ((codec = av_codec_iterate(&i)) != nullptr) {
     if (is_decoder) {
-      if (codec->id != id || !av_codec_is_decoder(codec)) {
+      if (codec->id != codec_id || !av_codec_is_decoder(codec)) {
         continue;
       }
     } else {
-      if (codec->id != id || !av_codec_is_encoder(codec)) {
+      if (codec->id != codec_id || !av_codec_is_encoder(codec)) {
         continue;
       }
     }
 
-      const AVCodecHWConfig* config = nullptr;
-      for (int j = 0; (config = avcodec_get_hw_config(codec, j)) != nullptr;
-           ++j) {
-        if (config->device_type == AV_HWDEVICE_TYPE_VAAPI) {
-          return codec;
-        }
-      }
-    }
-    return nullptr;
-  };
-
-  // Try the requested codec id first.
-  if (const AVCodec* c = findVaapiForId(codec_id)) {
-    return c;
-  }
-
-  // Encoder-only fallback: if no VAAPI encoder exists for codecId
-  // substitute a HW-capable alternative 
-   if (!is_decoder) {
-    static constexpr AVCodecID kHwEncoderFallbacks[] = {
-        AV_CODEC_ID_H264,
-        AV_CODEC_ID_HEVC,
-        AV_CODEC_ID_AV1,
-    };
-
-    for (AVCodecID fb : kHwEncoderFallbacks) {
-      if (const AVCodec* c = findVaapiForId(fb)) {
-        DEBUG_LOG(xpu::INFO, "No VAAPI encoder for codec_id=" << codec_id
-                << "; substituting with " << c->name);
-        return c;
+    const AVCodecHWConfig* config = nullptr;
+    for (int j = 0; (config = avcodec_get_hw_config(codec, j)) != nullptr;
+         ++j) {
+      if (config->device_type == AV_HWDEVICE_TYPE_VAAPI) {
+        DEBUG_LOG(xpu::INFO, "Found VAAPI codec");
+        return codec;
       }
     }
   }
 
+  DEBUG_LOG(xpu::INFO, "VAAPI codec not found");
   return std::nullopt;
 }
 
@@ -719,7 +695,7 @@ AVPixelFormat XpuDeviceInterface::get_encoding_pixel_format(
 void XpuDeviceInterface::setup_hardware_frame_context_for_encoding(
     AVCodecContext* codec_context) {
   if (!ctx_) {
-    DEBUG_LOG(xpu::INFO, "No VAAPI context; skipping hw_frames_ctx setup (SW encoding).");
+    DEBUG_LOG(xpu::INFO, "No VAAPI context: skipping hw_frames_ctx setup (will fall to CPU encoding)");
     return;
   }
   TORCH_CHECK(codec_context != nullptr, "codec_context is null");
@@ -826,21 +802,18 @@ UniqueAVFrame XpuDeviceInterface::convert_tensor_to_av_frame_for_encoding(
   // SYCL is unavailable (USE_SYCL_KERNELS disabled, no FP64 support, or built
   // without WITH_SYCL_KERNELS). In that case, fall back to the CPU path.
   UniqueAVFrame avFrame =
-      convert_tensor_to_av_frame_for_encoding_sycl(tensor, frame_index, codec_context);
+      convert_tensor_to_av_frame_for_encoding_with_sycl(tensor, frame_index, codec_context);
   if (avFrame) {
-    DEBUG_LOG(xpu::VERBOSE, "[XPU Encoder] Encoding frame " << frame_index
-            << " via SYCL on device=xpu:" << device_.index());
     return avFrame;
   }
 
-  DEBUG_LOG(xpu::VERBOSE, "[XPU Encoder] Encoding frame " << frame_index << " via CPU fallback");
-  return convert_tensor_to_av_frame_for_encoding_cpu(tensor, frame_index, codec_context);
+  return convert_tensor_to_av_frame_for_encoding_with_cpu(tensor, frame_index, codec_context);
 }
 
 // ============================================================
 // Encoding: convertTensorToAVFrameForEncoding_SYCL
 // ============================================================
-UniqueAVFrame XpuDeviceInterface::convert_tensor_to_av_frame_for_encoding_sycl(
+UniqueAVFrame XpuDeviceInterface::convert_tensor_to_av_frame_for_encoding_with_sycl(
     [[maybe_unused]] const torch::stable::Tensor& tensor,
     [[maybe_unused]] int frame_index,
     [[maybe_unused]] AVCodecContext* codec_context) {
@@ -853,6 +826,8 @@ UniqueAVFrame XpuDeviceInterface::convert_tensor_to_av_frame_for_encoding_sycl(
 
   UniqueAVFrame vaFrame;
 #ifdef WITH_SYCL_KERNELS
+  DEBUG_LOG(xpu::VERBOSE, "Using SYCL kernel backend for conversion");
+
   const int width  = static_cast<int>(tensor.sizes()[2]);
   const int height = static_cast<int>(tensor.sizes()[1]);
   vaFrame = xpu::allocNV12Frame(width, height, frame_index, codec_context);
@@ -961,10 +936,12 @@ UniqueAVFrame XpuDeviceInterface::convert_tensor_to_av_frame_for_encoding_sycl(
 // ============================================================
 // Encoding: convertTensorToAVFrameForEncoding_CPU  (CPU fallback)
 // ============================================================
-UniqueAVFrame XpuDeviceInterface::convert_tensor_to_av_frame_for_encoding_cpu(
+UniqueAVFrame XpuDeviceInterface::convert_tensor_to_av_frame_for_encoding_with_cpu(
     const torch::stable::Tensor& tensor,
     int frame_index,
     AVCodecContext* codec_context) {
+  DEBUG_LOG(xpu::VERBOSE, "Using CPU for conversion");
+
   const int width  = static_cast<int>(tensor.sizes()[2]);
   const int height = static_cast<int>(tensor.sizes()[1]);
   UniqueAVFrame vaFrame =
