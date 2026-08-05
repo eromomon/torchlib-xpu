@@ -300,7 +300,7 @@ void XpuDeviceInterface::initialize_video(
 void XpuDeviceInterface::register_hardware_device_with_codec(
     AVCodecContext* codec_context) {
   if (!ctx_) {
-    VLOG(1) << "No VAAPI context; preparing CPU fallback interface.";
+    DEBUG_LOG(xpu::INFO, "No VAAPI context; preparing CPU fallback interface.");
     ensure_cpu_interface();
     return;
   }
@@ -634,9 +634,9 @@ std::optional<const AVCodec*> XpuDeviceInterface::find_codec(
     const AVCodecID& codec_id,
     bool is_decoder) {
   if (!ctx_) {
-    VLOG(1) << "No VAAPI context; deferring to software "
+    DEBUG_LOG(xpu::INFO, "No VAAPI context; deferring to software "
             << (is_decoder ? "decoder" : "encoder")
-            << " for codec_id=" << codec_id;
+            << " for codec_id=" << codec_id);
     return std::nullopt;
   }
 
@@ -681,8 +681,8 @@ std::optional<const AVCodec*> XpuDeviceInterface::find_codec(
 
     for (AVCodecID fb : kHwEncoderFallbacks) {
       if (const AVCodec* c = findVaapiForId(fb)) {
-        VLOG(1) << "No VAAPI encoder for codec_id=" << codec_id
-                << "; substituting with " << c->name;
+        DEBUG_LOG(xpu::INFO, "No VAAPI encoder for codec_id=" << codec_id
+                << "; substituting with " << c->name);
         return c;
       }
     }
@@ -719,7 +719,7 @@ AVPixelFormat XpuDeviceInterface::get_encoding_pixel_format(
 void XpuDeviceInterface::setup_hardware_frame_context_for_encoding(
     AVCodecContext* codec_context) {
   if (!ctx_) {
-    VLOG(1) << "No VAAPI context; skipping hw_frames_ctx setup (SW encoding).";
+    DEBUG_LOG(xpu::INFO, "No VAAPI context; skipping hw_frames_ctx setup (SW encoding).");
     return;
   }
   TORCH_CHECK(codec_context != nullptr, "codec_context is null");
@@ -828,12 +828,12 @@ UniqueAVFrame XpuDeviceInterface::convert_tensor_to_av_frame_for_encoding(
   UniqueAVFrame avFrame =
       convert_tensor_to_av_frame_for_encoding_sycl(tensor, frame_index, codec_context);
   if (avFrame) {
-    VLOG(9) << "[XPU Encoder] Encoding frame " << frame_index
-            << " via SYCL on device=xpu:" << device_.index();
+    DEBUG_LOG(xpu::VERBOSE, "[XPU Encoder] Encoding frame " << frame_index
+            << " via SYCL on device=xpu:" << device_.index());
     return avFrame;
   }
 
-  VLOG(9) << "[XPU Encoder] Encoding frame " << frame_index << " via CPU fallback";
+  DEBUG_LOG(xpu::VERBOSE, "[XPU Encoder] Encoding frame " << frame_index << " via CPU fallback");
   return convert_tensor_to_av_frame_for_encoding_cpu(tensor, frame_index, codec_context);
 }
 
