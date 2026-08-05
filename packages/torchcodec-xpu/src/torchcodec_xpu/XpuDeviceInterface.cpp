@@ -228,6 +228,9 @@ XpuDeviceInterface::XpuDeviceInterface(const StableDevice& device)
   TORCH_CHECK(
       device_.type() == kStableXPU, "Unsupported device: must be XPU");
 
+  TORCH_CHECK(!xpu::force_cpu_fallback() || xpu::cpu_fallback(),
+      "CPU fallback forced but not allowed");
+
   // It is important for pytorch itself to create the xpu context. If ffmpeg
   // creates the context it may not be compatible with pytorch.
   // This is a dummy tensor to initialize the xpu context.
@@ -262,20 +265,21 @@ XpuDeviceInterface::~XpuDeviceInterface() {
   }
 }
 
-void XpuDeviceInterface::initialize(const SharedAVCodecContext& codec_context) {
-  codec_context_ = codec_context;
-}
-
-DeviceInterface* XpuDeviceInterface::ensure_cpu_interface() {
+void XpuDeviceInterface::ensure_cpu_interface() {
   if (!cpu_interface_) {
     cpu_interface_ = create_device_interface(kStableCPU);
     STD_TORCH_CHECK(
         cpu_interface_ != nullptr, "Failed to create CPU device interface");
-    if (codec_context_) {
-      cpu_interface_->initialize(codec_context_);
-    }
   }
-  return cpu_interface_.get();
+}
+
+void XpuDeviceInterface::initialize(const SharedAVCodecContext& codec_context) {
+  codec_context_ = codec_context;
+
+  if (xpu::cpu_fallback()) {
+    ensure_cpu_interface();
+    cpu_interface_->initialize(codec_context_);
+  }
 }
 
 void XpuDeviceInterface::initialize_video(
@@ -288,24 +292,23 @@ void XpuDeviceInterface::initialize_video(
   time_base_ = av_stream->time_base;
   video_stream_options_ = video_stream_options;
 
-  ensure_cpu_interface();
-  cpu_interface_->initialize_video(
-      av_stream,
-      av_format_ctx,
-      VideoStreamOptions(),
-      {},
-      /*resized_output_dims=*/std::nullopt);
+  if (xpu::cpu_fallback()) {
+    ensure_cpu_interface();
+    cpu_interface_->initialize_video(
+        av_stream,
+        av_format_ctx,
+        VideoStreamOptions(),
+        {},
+        /*resized_output_dims=*/std::nullopt);
+  }
 }
 
 void XpuDeviceInterface::register_hardware_device_with_codec(
     AVCodecContext* codec_context) {
-  if (!ctx_) {
-    DEBUG_LOG(xpu::INFO, "No VAAPI context; preparing CPU fallback interface.");
-    ensure_cpu_interface();
-    return;
+  if (ctx_) {
+    TORCH_CHECK(codec_context != nullptr, "codec_context is null");
+    codec_context->hw_device_ctx = av_buffer_ref(ctx_.get());
   }
-  TORCH_CHECK(codec_context != nullptr, "codec_context is null");
-  codec_context->hw_device_ctx = av_buffer_ref(ctx_.get());
 }
 
 VADisplay getVaDisplayFromAV(AVFrame* avFrame) {
@@ -444,6 +447,7 @@ void XpuDeviceInterface::convert_av_frame_to_frame_output(
 
     DEBUG_LOG(xpu::VERBOSE, "Incoming frame is on CPU, forwarding to CPU conversion");
     TORCH_CHECK(xpu::cpu_fallback(), "CPU fallback not allowed");
+    ensure_cpu_interface();
 
     FrameOutput cpuFrameOutput;
     cpu_interface_->convert_av_frame_to_frame_output(av_frame, cpuFrameOutput);
@@ -671,15 +675,13 @@ std::optional<const AVCodec*> XpuDeviceInterface::find_codec(
 // Encoding: getEncodingPixelFormat
 // ============================================================
 // On the VAAPI path, XPU encoders consume NV12; user-supplied pixel_format
-// is rejected. On the CPU fallback path, defer to the CPU device interface.
+// is rejected. On the CPU fallback path we can't defer to the CPU device
+// interface as get_encoding_pixel_format() might be called before it is
+// initialized (we can't initialize in constructor due to mutex deadlock).
+// So we for all cases consume NV12.
 AVPixelFormat XpuDeviceInterface::get_encoding_pixel_format(
-    const AVCodec& av_codec,
+    [[maybe_unused]] const AVCodec& av_codec,
     const std::optional<std::string>& user_pixel_format) const {
-  if (!ctx_) {
-    return cpu_interface_
-        ? cpu_interface_->get_encoding_pixel_format(av_codec, user_pixel_format)
-        : AV_PIX_FMT_YUV420P;
-  }
   STD_TORCH_CHECK(
       !user_pixel_format.has_value(),
       "Video encoding on XPU currently only supports the nv12 pixel format. "
@@ -785,12 +787,13 @@ UniqueAVFrame XpuDeviceInterface::convert_tensor_to_av_frame_for_encoding(
 
   // No VAAPI context: copy tensor to CPU and delegate to CpuDeviceInterface.
   if (!ctx_) {
-    auto* cpu = ensure_cpu_interface();
+    TORCH_CHECK(xpu::cpu_fallback(), "CPU fallback not allowed");
+    ensure_cpu_interface();
     auto cpu_tensor = torch::stable::empty(
         {tensor.sizes()[0], tensor.sizes()[1], tensor.sizes()[2]},
         kStableUInt8, std::nullopt, StableDevice(kStableCPU));
     torch::stable::copy_(cpu_tensor, tensor);
-    return cpu->convert_tensor_to_av_frame_for_encoding(
+    return cpu_interface_->convert_tensor_to_av_frame_for_encoding(
         cpu_tensor, frame_index, codec_context);
   }
 

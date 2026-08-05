@@ -53,7 +53,6 @@ class XpuDeviceInterface : public DeviceInterface {
  private:
   // CPU fallback interface. Used when frames cannot be handled on XPU
   std::unique_ptr<DeviceInterface> cpu_interface_;
-  DeviceInterface* ensure_cpu_interface();
 
   VideoStreamOptions video_stream_options_;
   AVRational time_base_;
@@ -66,6 +65,8 @@ class XpuDeviceInterface : public DeviceInterface {
   // Used to know whether a new FilterGraphContext should
   // be created before decoding a new frame.
   FiltersConfig prev_filters_config_;
+
+  void ensure_cpu_interface();
 
   // Optimized conversion. Return value indicates if conversion was
   // successfull.
