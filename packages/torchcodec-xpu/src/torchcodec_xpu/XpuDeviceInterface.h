@@ -37,9 +37,21 @@ class XpuDeviceInterface : public DeviceInterface {
       std::optional<torch::stable::Tensor> pre_allocated_output_tensor =
           std::nullopt) override;
 
+  // ---- Encoding overrides ----
+  UniqueAVFrame convert_tensor_to_av_frame_for_encoding(
+      const torch::stable::Tensor& tensor,
+      int frame_index,
+      AVCodecContext* codec_context) override;
+
+  AVPixelFormat get_encoding_pixel_format(
+      const AVCodec& av_codec,
+      const std::optional<std::string>& user_pixel_format) const override;
+
+  void setup_hardware_frame_context_for_encoding(
+      AVCodecContext* codec_context) override;
+
  private:
-  // We sometimes encounter frames that cannot be decoded on the XPU device.
-  // Rather than erroring out, we decode them on the CPU.
+  // CPU fallback interface. Used when frames cannot be handled on XPU
   std::unique_ptr<DeviceInterface> cpu_interface_;
 
   VideoStreamOptions video_stream_options_;
@@ -54,6 +66,8 @@ class XpuDeviceInterface : public DeviceInterface {
   // be created before decoding a new frame.
   FiltersConfig prev_filters_config_;
 
+  void ensure_cpu_interface();
+
   // Optimized conversion. Return value indicates if conversion was
   // successfull.
   bool convert_av_frame_to_frame_output_with_sycl(
@@ -63,6 +77,21 @@ class XpuDeviceInterface : public DeviceInterface {
   void convert_av_frame_to_frame_output_with_filter_graph(
       UniqueAVFrame& av_frame,
       torch::stable::Tensor& dst);
+
+  // ---- Encoding helpers ----
+  // SYCL path: exports VAAPI surface as DMA-BUF, imports via Level Zero USM,
+  // runs convertRGBToNV12 directly on the surface. Returns null when SYCL
+  // is unavailable.
+  UniqueAVFrame convert_tensor_to_av_frame_for_encoding_with_sycl(
+      const torch::stable::Tensor& tensor,
+      int frame_index,
+      AVCodecContext* codec_context);
+  // CPU fallback: moves tensor to CPU, uses libswscale GBRP->NV12,
+  // then av_hwframe_transfer_data to upload into the VAAPI surface.
+  UniqueAVFrame convert_tensor_to_av_frame_for_encoding_with_cpu(
+      const torch::stable::Tensor& tensor,
+      int frame_index,
+      AVCodecContext* codec_context);
 };
 
 } // namespace facebook::torchcodec
