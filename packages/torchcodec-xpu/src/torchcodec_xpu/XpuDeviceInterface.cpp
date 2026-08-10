@@ -982,12 +982,29 @@ UniqueAVFrame XpuDeviceInterface::convert_tensor_to_av_frame_for_encoding_with_c
   gbrpFrame->linesize[1] = static_cast<int>(row_stride);
   gbrpFrame->linesize[2] = static_cast<int>(row_stride);
 
+  // Higher-quality chroma downsampling (GBRP is 4:4:4, NV12 is 4:2:0):
+  //   SWS_BICUBIC        - better than bilinear on edges
+  //   SWS_ACCURATE_RND   - full-precision rounding in the fixed-point math
+  //   SWS_FULL_CHR_H_INT - full horizontal chroma interpolation on output
+  const int swsFlags = SWS_BICUBIC | SWS_ACCURATE_RND | SWS_FULL_CHR_H_INT;
+
   // GBRP -> NV12 via libswscale
   SwsContext* swsCtx = sws_getContext(
       vaFrame->width, vaFrame->height, AV_PIX_FMT_GBRP,
       vaFrame->width, vaFrame->height, AV_PIX_FMT_NV12,
-      SWS_BILINEAR, nullptr, nullptr, nullptr);
+      swsFlags, nullptr, nullptr, nullptr);
   TORCH_CHECK(swsCtx != nullptr, "sws_getContext(GBRP->NV12) failed");
+
+  const int dstRange = (codec_context->color_range == AVCOL_RANGE_JPEG) ? 1 : 0;
+  const int cs = (codec_context->colorspace == AVCOL_SPC_BT709)
+                   ? SWS_CS_ITU709
+                   : SWS_CS_ITU601;
+  sws_setColorspaceDetails(
+      swsCtx,
+      sws_getCoefficients(cs), /*srcRange=*/1, 
+      sws_getCoefficients(cs), dstRange, 
+      /*brightness=*/0, /*contrast=*/1 << 16, /*saturation=*/1 << 16);
+
   int sws_ret = sws_scale(
       swsCtx,
       gbrpFrame->data,
