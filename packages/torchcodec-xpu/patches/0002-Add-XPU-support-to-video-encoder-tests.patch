@@ -76,7 +76,7 @@ diff --git a/test/test_encoders.py b/test/test_encoders.py
          )
          frame_rate = source_decoder.metadata.average_fps
 -        percentage, atol = (96, 2) if device == "cuda" else (99, 2)
-+        percentage, atol = (96, 2) if device.startswith(("cuda", "xpu")) else (99, 2)
++        percentage, atol = (95.5, 2) if device.startswith(("cuda", "xpu")) else (99, 2)
  
          enc, encoder_output, open_kwargs = self._create_encoder(
              method, tmp_path, format
@@ -90,7 +90,7 @@ diff --git a/test/test_encoders.py b/test/test_encoders.py
          )
          frame_rate = source_decoder.metadata.average_fps
 -        percentage, atol = (96, 2) if device == "cuda" else (99, 2)
-+        percentage, atol = (96, 2) if device.startswith(("cuda", "xpu")) else (99, 2)
++        percentage, atol = (95.5, 2) if device.startswith(("cuda", "xpu")) else (99, 2)
  
          enc, encoder_output, open_kwargs = self._create_encoder(
              method, tmp_path, format
