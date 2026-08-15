@@ -3,6 +3,7 @@
 
 #include <unistd.h>
 #include <stdlib.h>
+#include <cstdio>
 #include <string>
 #include <unordered_map>
 
@@ -180,18 +181,45 @@ torch::stable::Tensor allocate_empty_hwc_tensor(
       device);
 }
 
+// Allocates a VAAPI-backed NV12 AVFrame for encoding by pulling a buffer from
+// the codec's hw_frames_ctx pool created in setupHardwareFrameContextForEncoding.
+UniqueAVFrame allocNV12Frame(
+    int width,
+    int height,
+    int frame_index,
+    AVCodecContext* codec_context) {
+  TORCH_CHECK(codec_context != nullptr, "codec_context is null");
+  TORCH_CHECK(
+      codec_context->hw_frames_ctx != nullptr,
+      "hw_frames_ctx is null: call setupHardwareFrameContextForEncoding first");
+
+  UniqueAVFrame vaFrame(av_frame_alloc());
+  TORCH_CHECK(vaFrame != nullptr, "Failed to allocate AVFrame for encoding");
+  vaFrame->format = AV_PIX_FMT_VAAPI;
+  vaFrame->width  = width;
+  vaFrame->height = height;
+  vaFrame->pts    = frame_index;
+
+  int ret = av_hwframe_get_buffer(codec_context->hw_frames_ctx, vaFrame.get(), 0);
+  TORCH_CHECK(
+      ret >= 0,
+      "av_hwframe_get_buffer failed: ",
+      get_ffmpeg_error_string_from_error_code(ret));
+  return vaFrame;
+}
+
 } // namespace xpu
 
 int get_device_index(const StableDevice& device) {
   // PyTorch uses int8_t as its torch::DeviceIndex, but FFmpeg and XPU
   // libraries use int. So we use int, too.
-  int deviceIndex = static_cast<int>(device.index());
+  int device_index = static_cast<int>(device.index());
   TORCH_CHECK(
-      deviceIndex >= -1 && deviceIndex < xpu::MAX_XPU_GPUS,
+      device_index >= -1 && device_index < xpu::MAX_XPU_GPUS,
       "Invalid device index = ",
-      deviceIndex);
+      device_index);
 
-  return (deviceIndex == -1)? 0: deviceIndex;
+  return (device_index == -1)? 0: device_index;
 }
 
 XpuDeviceInterface::XpuDeviceInterface(const StableDevice& device)
@@ -199,6 +227,9 @@ XpuDeviceInterface::XpuDeviceInterface(const StableDevice& device)
   TORCH_CHECK(xpu::g_xpu, "XpuDeviceInterface was not registered!");
   TORCH_CHECK(
       device_.type() == kStableXPU, "Unsupported device: must be XPU");
+
+  TORCH_CHECK(!xpu::force_cpu_fallback() || xpu::cpu_fallback(),
+      "CPU fallback forced but not allowed");
 
   // It is important for pytorch itself to create the xpu context. If ffmpeg
   // creates the context it may not be compatible with pytorch.
@@ -234,8 +265,21 @@ XpuDeviceInterface::~XpuDeviceInterface() {
   }
 }
 
+void XpuDeviceInterface::ensure_cpu_interface() {
+  if (!cpu_interface_) {
+    cpu_interface_ = create_device_interface(kStableCPU);
+    STD_TORCH_CHECK(
+        cpu_interface_ != nullptr, "Failed to create CPU device interface");
+  }
+}
+
 void XpuDeviceInterface::initialize(const SharedAVCodecContext& codec_context) {
   codec_context_ = codec_context;
+
+  if (xpu::cpu_fallback()) {
+    ensure_cpu_interface();
+    cpu_interface_->initialize(codec_context_);
+  }
 }
 
 void XpuDeviceInterface::initialize_video(
@@ -248,26 +292,23 @@ void XpuDeviceInterface::initialize_video(
   time_base_ = av_stream->time_base;
   video_stream_options_ = video_stream_options;
 
-  cpu_interface_ = create_device_interface(kStableCPU);
-  STD_TORCH_CHECK(
-      cpu_interface_ != nullptr, "Failed to create CPU device interface");
-  cpu_interface_->initialize(codec_context_);
-  cpu_interface_->initialize_video(
-      av_stream,
-      av_format_ctx,
-      VideoStreamOptions(),
-      {},
-      /*resized_output_dims=*/std::nullopt);
+  if (xpu::cpu_fallback()) {
+    ensure_cpu_interface();
+    cpu_interface_->initialize_video(
+        av_stream,
+        av_format_ctx,
+        VideoStreamOptions(),
+        {},
+        /*resized_output_dims=*/std::nullopt);
+  }
 }
 
 void XpuDeviceInterface::register_hardware_device_with_codec(
     AVCodecContext* codec_context) {
-  if (!ctx_) {
-    DEBUG_LOG(xpu::INFO, "HW context not initialized, falling back to CPU");
-    return;
+  if (ctx_) {
+    TORCH_CHECK(codec_context != nullptr, "codec_context is null");
+    codec_context->hw_device_ctx = av_buffer_ref(ctx_.get());
   }
-  TORCH_CHECK(codec_context != nullptr, "codec_context is null");
-  codec_context->hw_device_ctx = av_buffer_ref(ctx_.get());
 }
 
 VADisplay getVaDisplayFromAV(AVFrame* avFrame) {
@@ -406,6 +447,7 @@ void XpuDeviceInterface::convert_av_frame_to_frame_output(
 
     DEBUG_LOG(xpu::VERBOSE, "Incoming frame is on CPU, forwarding to CPU conversion");
     TORCH_CHECK(xpu::cpu_fallback(), "CPU fallback not allowed");
+    ensure_cpu_interface();
 
     FrameOutput cpuFrameOutput;
     cpu_interface_->convert_av_frame_to_frame_output(av_frame, cpuFrameOutput);
@@ -595,6 +637,13 @@ bool XpuDeviceInterface::convert_av_frame_to_frame_output_with_sycl(
 std::optional<const AVCodec*> XpuDeviceInterface::find_codec(
     const AVCodecID& codec_id,
     bool is_decoder) {
+  DEBUG_LOG(xpu::INFO, "Looking for " << avcodec_get_name(codec_id)
+    << (is_decoder ? " VAAPI decoder" : " VAAPI encoder"));
+  if (!ctx_) {
+    DEBUG_LOG(xpu::INFO, "No VAAPI context: deferring to software codec");
+    return std::nullopt;
+  }
+
   void* i = nullptr;
   const AVCodec* codec = nullptr;
   while ((codec = av_codec_iterate(&i)) != nullptr) {
@@ -612,12 +661,387 @@ std::optional<const AVCodec*> XpuDeviceInterface::find_codec(
     for (int j = 0; (config = avcodec_get_hw_config(codec, j)) != nullptr;
          ++j) {
       if (config->device_type == AV_HWDEVICE_TYPE_VAAPI) {
+        DEBUG_LOG(xpu::INFO, "Found VAAPI codec");
         return codec;
       }
     }
   }
 
+  DEBUG_LOG(xpu::INFO, "VAAPI codec not found");
   return std::nullopt;
+}
+
+// ============================================================
+// Encoding: getEncodingPixelFormat
+// ============================================================
+// On the VAAPI path, XPU encoders consume NV12; user-supplied pixel_format
+// is rejected. On the CPU fallback path we can't defer to the CPU device
+// interface as get_encoding_pixel_format() might be called before it is
+// initialized (we can't initialize in constructor due to mutex deadlock).
+// So we for all cases consume NV12.
+AVPixelFormat XpuDeviceInterface::get_encoding_pixel_format(
+    [[maybe_unused]] const AVCodec& av_codec,
+    const std::optional<std::string>& user_pixel_format) const {
+  STD_TORCH_CHECK(
+      !user_pixel_format.has_value(),
+      "Video encoding on XPU currently only supports the nv12 pixel format. "
+      "Do not set pixel_format to use nv12 by default.");
+  return AV_PIX_FMT_NV12;
+}
+
+// ============================================================
+// Encoding: setupHardwareFrameContextForEncoding
+// ============================================================
+// On the VAAPI path, the encoder can write directly into VAAPI surfaces (NV12 layout).
+// On the CPU fallback path, the SW encoder consumes plain CPU AVFrames.
+void XpuDeviceInterface::setup_hardware_frame_context_for_encoding(
+    AVCodecContext* codec_context) {
+  if (!ctx_) {
+    DEBUG_LOG(xpu::INFO, "No VAAPI context: skipping hw_frames_ctx setup (will fall to CPU encoding)");
+    // On the CPU fallback path force real-time SW encoding: without tune=zerolatency
+    // libx264 buffers frames, breaking mid-encode fragmented-MP4 reads (mov seek EPERM).
+    if (codec_context != nullptr){
+      if (codec_context->priv_data != nullptr){
+        av_opt_set(codec_context->priv_data, "tune", "zerolatency",
+                  AV_OPT_SEARCH_CHILDREN);
+      }
+      codec_context->max_b_frames = 0;
+    }
+    return;
+  }
+  TORCH_CHECK(codec_context != nullptr, "codec_context is null");
+
+  AVBufferRef* hwFramesCtxRef = av_hwframe_ctx_alloc(ctx_.get());
+  TORCH_CHECK(
+      hwFramesCtxRef != nullptr,
+      "Failed to allocate VAAPI hw frames context for codec");
+
+  // sw_pix_fmt: the software (CPU-accessible) format the encoder consumes inside the surface
+  // pix_fmt:    the hardware wrapper format the codec sees (must match hw_frames_ctx->format)
+  codec_context->sw_pix_fmt = AV_PIX_FMT_NV12;
+  codec_context->pix_fmt    = AV_PIX_FMT_VAAPI;
+
+  auto* hwFramesCtx = reinterpret_cast<AVHWFramesContext*>(hwFramesCtxRef->data);
+  hwFramesCtx->format    = AV_PIX_FMT_VAAPI;
+  hwFramesCtx->sw_format = AV_PIX_FMT_NV12;
+  hwFramesCtx->width     = codec_context->width;
+  hwFramesCtx->height    = codec_context->height;
+
+  // XPU quality is materially better when using BT.709 color space and full range
+  // (JPEG) for encoding.
+  if (codec_context->color_range == AVCOL_RANGE_UNSPECIFIED) {
+      codec_context->color_range = AVCOL_RANGE_JPEG;
+  }
+  if (codec_context->colorspace == AVCOL_SPC_UNSPECIFIED) {
+      codec_context->colorspace = AVCOL_SPC_BT709;
+  }
+  if (codec_context->color_primaries == AVCOL_PRI_UNSPECIFIED) {
+      codec_context->color_primaries = AVCOL_PRI_BT709;
+  }
+  if (codec_context->color_trc == AVCOL_TRC_UNSPECIFIED) {
+      codec_context->color_trc = AVCOL_TRC_BT709;
+  }
+
+  // Force non-LP VAAPI engine for better quality under async_depth=1;
+  // caller-supplied low_power via extra_options overrides this later.
+  if (codec_context->priv_data != nullptr) {
+      av_opt_set(codec_context->priv_data, "low_power", "0",
+                 AV_OPT_SEARCH_CHILDREN);
+      // `quality=1` selects the highest-quality preset on VAAPI codecs that
+      // expose it. av_opt_set is silent on codecs that don't, so it's safe.
+      av_opt_set(codec_context->priv_data, "quality", "1",
+                 AV_OPT_SEARCH_CHILDREN);
+  }
+
+  // Disable B-frames (mirrors CUDA/NVENC delay=0) to avoid frames reordering.
+  // Callers can restore via extra_options={"bf": "2"}.
+  codec_context->max_b_frames = 0;
+
+  int ret = av_hwframe_ctx_init(hwFramesCtxRef);
+  if (ret < 0) {
+    av_buffer_unref(&hwFramesCtxRef);
+    TORCH_CHECK(
+        false,
+        "Failed to initialize VAAPI hw frames context: ",
+        get_ffmpeg_error_string_from_error_code(ret));
+  }
+  codec_context->hw_frames_ctx = hwFramesCtxRef;
+}
+
+// ============================================================
+// Encoding: convertTensorToAVFrameForEncoding
+// ============================================================
+UniqueAVFrame XpuDeviceInterface::convert_tensor_to_av_frame_for_encoding(
+    const torch::stable::Tensor& tensor,
+    int frame_index,
+    AVCodecContext* codec_context) {
+  TORCH_CHECK(
+      tensor.dim() == 3 && tensor.sizes()[0] == 3,
+      "Expected 3D RGB tensor (CHW format), got ",
+      tensor.dim(),
+      "D tensor");
+  TORCH_CHECK(
+      tensor.device().type() == kStableXPU,
+      "Expected tensor on XPU device, got: ",
+      device_type_name(tensor.device().type()));
+  const int width = static_cast<int>(tensor.sizes()[2]);
+  const int height = static_cast<int>(tensor.sizes()[1]);
+  TORCH_CHECK(
+      (width % 2) == 0 && (height % 2) == 0,
+      "NV12 encoding requires even width/height, got ",
+      width,
+      "x",
+      height);
+  TORCH_CHECK(codec_context != nullptr, "codec_context is null");
+
+  // No VAAPI context: copy tensor to CPU and delegate to CpuDeviceInterface.
+  if (!ctx_) {
+    TORCH_CHECK(xpu::cpu_fallback(), "CPU fallback not allowed");
+    ensure_cpu_interface();
+    auto cpu_tensor = torch::stable::empty(
+        {tensor.sizes()[0], tensor.sizes()[1], tensor.sizes()[2]},
+        kStableUInt8, std::nullopt, StableDevice(kStableCPU));
+    torch::stable::copy_(cpu_tensor, tensor);
+    return cpu_interface_->convert_tensor_to_av_frame_for_encoding(
+        cpu_tensor, frame_index, codec_context);
+  }
+
+  TORCH_CHECK(
+      codec_context->hw_frames_ctx != nullptr,
+      "hw_frames_ctx is null: call setupHardwareFrameContextForEncoding first");
+
+  // Try the optimized SYCL path first. It returns a null UniqueAVFrame when
+  // SYCL is unavailable (USE_SYCL_KERNELS disabled, no FP64 support, or built
+  // without WITH_SYCL_KERNELS). In that case, fall back to the CPU path.
+  UniqueAVFrame avFrame =
+      convert_tensor_to_av_frame_for_encoding_with_sycl(tensor, frame_index, codec_context);
+  if (avFrame) {
+    return avFrame;
+  }
+
+  return convert_tensor_to_av_frame_for_encoding_with_cpu(tensor, frame_index, codec_context);
+}
+
+// ============================================================
+// Encoding: convertTensorToAVFrameForEncoding_SYCL
+// ============================================================
+UniqueAVFrame XpuDeviceInterface::convert_tensor_to_av_frame_for_encoding_with_sycl(
+    [[maybe_unused]] const torch::stable::Tensor& tensor,
+    [[maybe_unused]] int frame_index,
+    [[maybe_unused]] AVCodecContext* codec_context) {
+  if (!xpu::use_sycl_color_conversion_kernel()) {
+    return UniqueAVFrame();
+  }
+  if (!has_fp64_) {
+    return UniqueAVFrame();
+  }
+
+  UniqueAVFrame vaFrame;
+#ifdef WITH_SYCL_KERNELS
+  DEBUG_LOG(xpu::VERBOSE, "Using SYCL kernel backend for conversion");
+
+  const int width  = static_cast<int>(tensor.sizes()[2]);
+  const int height = static_cast<int>(tensor.sizes()[1]);
+  vaFrame = xpu::allocNV12Frame(width, height, frame_index, codec_context);
+
+  VADisplay display = getVaDisplayFromAV(vaFrame.get());
+  VASurfaceID surfaceId = (VASurfaceID)(uintptr_t)vaFrame->data[3];
+
+  VADRMPRIMESurfaceDescriptor desc{};
+  VAStatus sts = vaExportSurfaceHandle(
+      display,
+      surfaceId,
+      VA_SURFACE_ATTRIB_MEM_TYPE_DRM_PRIME_2,
+      VA_EXPORT_SURFACE_WRITE_ONLY,  // write for encoding (vs. READ_ONLY for decoding)
+      &desc);
+  TORCH_CHECK(
+      sts == VA_STATUS_SUCCESS,
+      "vaExportSurfaceHandle (WRITE_ONLY) failed: ",
+      vaErrorStr(sts));
+  TORCH_CHECK(desc.num_objects == 1, "Expected 1 DMA-BUF object, got ", desc.num_objects);
+  // NV12 export layouts seen on Intel iHD/i915:
+  //   A: 1 layer × 2 planes (Y, UV).   B: 2 layers × 1 plane (Y; UV) — used by BMG.
+  // Both describe the same DMA-BUF; only the plane offsets/pitches differ.
+  const bool layoutA = (desc.num_layers == 1 && desc.layers[0].num_planes == 2);
+  const bool layoutB = (desc.num_layers == 2 && desc.layers[0].num_planes == 1
+                        && desc.layers[1].num_planes == 1);
+  TORCH_CHECK(
+      layoutA || layoutB,
+      "Unsupported NV12 export layout: num_layers=", desc.num_layers,
+      " layers[0].num_planes=", desc.layers[0].num_planes);
+
+  // Get Level Zero context and device handles via SYCL interop.
+  sycl::queue queue = c10::xpu::getCurrentXPUStream(device_.index());
+  ze_context_handle_t zeCtx  = nullptr;
+  ze_device_handle_t  zeDevice = nullptr;
+  queue
+      .submit([&](sycl::handler& cgh) {
+        cgh.host_task([&](const sycl::interop_handle& ih) {
+          zeCtx    = ih.get_native_context<sycl::backend::ext_oneapi_level_zero>();
+          zeDevice = ih.get_native_device<sycl::backend::ext_oneapi_level_zero>();
+        });
+      })
+      .wait();
+
+  ze_external_memory_import_fd_t import_fd_desc{};
+  import_fd_desc.stype = ZE_STRUCTURE_TYPE_EXTERNAL_MEMORY_IMPORT_FD;
+  import_fd_desc.flags = ZE_EXTERNAL_MEMORY_TYPE_FLAG_DMA_BUF;
+  import_fd_desc.fd    = desc.objects[0].fd;
+
+  ze_device_mem_alloc_desc_t alloc_desc{};
+  alloc_desc.pNext = &import_fd_desc;
+  void* usm_ptr = nullptr;
+  ze_result_t res = zeMemAllocDevice(
+      zeCtx, &alloc_desc, desc.objects[0].size, 0, zeDevice, &usm_ptr);
+
+  if (res != ZE_RESULT_SUCCESS) {
+    close(desc.objects[0].fd);
+    TORCH_CHECK(
+        false,
+        "zeMemAllocDevice failed importing encode surface fd=",
+        desc.objects[0].fd);
+   }
+
+  // Extract Y and UV plane pointers and pitches for both layouts
+  uint8_t* y_ptr;
+  uint8_t* uv_ptr;
+  int y_pitch, uv_pitch;
+  if (layoutA) {
+    y_ptr    = static_cast<uint8_t*>(usm_ptr) + desc.layers[0].offset[0];
+    uv_ptr   = static_cast<uint8_t*>(usm_ptr) + desc.layers[0].offset[1];
+    y_pitch  = static_cast<int>(desc.layers[0].pitch[0]);
+    uv_pitch = static_cast<int>(desc.layers[0].pitch[1]);
+  } else {
+    y_ptr    = static_cast<uint8_t*>(usm_ptr) + desc.layers[0].offset[0];
+    uv_ptr   = static_cast<uint8_t*>(usm_ptr) + desc.layers[1].offset[0];
+    y_pitch  = static_cast<int>(desc.layers[0].pitch[0]);
+    uv_pitch = static_cast<int>(desc.layers[1].pitch[0]);
+  }
+
+  // drm_format_modifier != 0 means tiled (e.g. Intel Tile-Y on BMG/Gen12+).
+  const bool is_tiled = (desc.objects[0].drm_format_modifier != 0);
+  convertRGBToNV12(
+      queue,
+      static_cast<const uint8_t*>(tensor.data_ptr()),
+      tensor.strides()[0],   // ch_stride
+      tensor.strides()[1],   // row_stride
+      tensor.strides()[2],   // pixel_stride
+      y_ptr,
+      uv_ptr,
+      vaFrame->width,
+      vaFrame->height,
+      y_pitch,
+      uv_pitch,
+      is_tiled,
+      codec_context->color_range,
+      codec_context->colorspace);
+
+  zeMemFree(zeCtx, usm_ptr);
+  close(desc.objects[0].fd);
+
+  vaFrame->colorspace  = codec_context->colorspace;
+  vaFrame->color_range = codec_context->color_range;
+#endif
+  return vaFrame;
+}
+
+// ============================================================
+// Encoding: convertTensorToAVFrameForEncoding_CPU  (CPU fallback)
+// ============================================================
+UniqueAVFrame XpuDeviceInterface::convert_tensor_to_av_frame_for_encoding_with_cpu(
+    const torch::stable::Tensor& tensor,
+    int frame_index,
+    AVCodecContext* codec_context) {
+  DEBUG_LOG(xpu::VERBOSE, "Using CPU for conversion");
+
+  const int width  = static_cast<int>(tensor.sizes()[2]);
+  const int height = static_cast<int>(tensor.sizes()[1]);
+  UniqueAVFrame vaFrame =
+      xpu::allocNV12Frame(width, height, frame_index, codec_context);
+
+  // Move XPU tensor to CPU (blocking)
+  torch::stable::Tensor cpuTensor =
+      torch::stable::to(tensor, StableDevice(kStableCPU, 0));
+
+  const uint8_t* data = static_cast<const uint8_t*>(cpuTensor.data_ptr());
+  // strides() are in elements (uint8), so they equal byte strides here.
+  int64_t ch_stride  = cpuTensor.strides()[0];
+  int64_t row_stride = cpuTensor.strides()[1];
+
+  // Allocate an intermediate CPU NV12 frame for sws_scale output
+  UniqueAVFrame cpuFrame(av_frame_alloc());
+  TORCH_CHECK(cpuFrame != nullptr, "Failed to allocate CPU NV12 AVFrame");
+  cpuFrame->format = AV_PIX_FMT_NV12;
+  cpuFrame->width  = vaFrame->width;
+  cpuFrame->height = vaFrame->height;
+  int ret = av_frame_get_buffer(cpuFrame.get(), 0);
+  TORCH_CHECK(ret >= 0, "av_frame_get_buffer (NV12) failed: ",
+              get_ffmpeg_error_string_from_error_code(ret));
+
+  // Zero-copy GBRP view of the NCHW tensor (GBRP plane order: G=ch1, B=ch2, R=ch0).
+  UniqueAVFrame gbrpFrame(av_frame_alloc());
+  TORCH_CHECK(gbrpFrame != nullptr, "Failed to allocate GBRP AVFrame");
+  gbrpFrame->format = AV_PIX_FMT_GBRP;
+  gbrpFrame->width  = vaFrame->width;
+  gbrpFrame->height = vaFrame->height;
+  gbrpFrame->data[0] = const_cast<uint8_t*>(data + 1 * ch_stride);  // G
+  gbrpFrame->data[1] = const_cast<uint8_t*>(data + 2 * ch_stride);  // B
+  gbrpFrame->data[2] = const_cast<uint8_t*>(data + 0 * ch_stride);  // R
+  gbrpFrame->linesize[0] = static_cast<int>(row_stride);
+  gbrpFrame->linesize[1] = static_cast<int>(row_stride);
+  gbrpFrame->linesize[2] = static_cast<int>(row_stride);
+
+  // Higher-quality chroma downsampling (GBRP is 4:4:4, NV12 is 4:2:0):
+  //   SWS_BICUBIC        - better than bilinear on edges
+  //   SWS_ACCURATE_RND   - full-precision rounding in the fixed-point math
+  //   SWS_FULL_CHR_H_INT - full horizontal chroma interpolation on output
+  const int swsFlags = SWS_BICUBIC | SWS_ACCURATE_RND | SWS_FULL_CHR_H_INT;
+
+  // GBRP -> NV12 via libswscale
+  SwsContext* swsCtx = sws_getContext(
+      vaFrame->width, vaFrame->height, AV_PIX_FMT_GBRP,
+      vaFrame->width, vaFrame->height, AV_PIX_FMT_NV12,
+      swsFlags, nullptr, nullptr, nullptr);
+  TORCH_CHECK(swsCtx != nullptr, "sws_getContext(GBRP->NV12) failed");
+
+  const int dstRange = (codec_context->color_range == AVCOL_RANGE_JPEG) ? 1 : 0;
+  const int cs = (codec_context->colorspace == AVCOL_SPC_BT709)
+                   ? SWS_CS_ITU709
+                   : SWS_CS_ITU601;
+  sws_setColorspaceDetails(
+      swsCtx,
+      sws_getCoefficients(cs), /*srcRange=*/1, 
+      sws_getCoefficients(cs), dstRange, 
+      /*brightness=*/0, /*contrast=*/1 << 16, /*saturation=*/1 << 16);
+
+  int sws_ret = sws_scale(
+      swsCtx,
+      gbrpFrame->data,
+      gbrpFrame->linesize,
+      0,
+      vaFrame->height,
+      cpuFrame->data,
+      cpuFrame->linesize);
+  sws_freeContext(swsCtx);
+  TORCH_CHECK(
+      sws_ret >= 0,
+      "sws_scale(GBRP->NV12) failed: expected ",
+      get_ffmpeg_error_string_from_error_code(sws_ret))
+  TORCH_CHECK(
+      sws_ret == vaFrame->height,
+      "sws_scale(GBRP->NV12) failed: expected ", sws_ret,
+      "output lines, expected", vaFrame->height);
+
+  // Upload CPU NV12 -> VAAPI surface
+  ret = av_hwframe_transfer_data(vaFrame.get(), cpuFrame.get(), 0);
+  TORCH_CHECK(
+      ret >= 0,
+      "av_hwframe_transfer_data (NV12->VAAPI) failed: ",
+      get_ffmpeg_error_string_from_error_code(ret));
+
+  vaFrame->colorspace  = codec_context->colorspace;
+  vaFrame->color_range = codec_context->color_range;
+  return vaFrame;
 }
 
 } // namespace facebook::torchcodec
