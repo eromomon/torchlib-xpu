@@ -698,6 +698,15 @@ void XpuDeviceInterface::setup_hardware_frame_context_for_encoding(
     AVCodecContext* codec_context) {
   if (!ctx_) {
     DEBUG_LOG(xpu::INFO, "No VAAPI context: skipping hw_frames_ctx setup (will fall to CPU encoding)");
+    // On the CPU fallback path force real-time SW encoding: without tune=zerolatency
+    // libx264 buffers frames, breaking mid-encode fragmented-MP4 reads (mov seek EPERM).
+    if (codec_context != nullptr){
+      if (codec_context->priv_data != nullptr){
+        av_opt_set(codec_context->priv_data, "tune", "zerolatency",
+                  AV_OPT_SEARCH_CHILDREN);
+      }
+      codec_context->max_b_frames = 0;
+    }
     return;
   }
   TORCH_CHECK(codec_context != nullptr, "codec_context is null");
