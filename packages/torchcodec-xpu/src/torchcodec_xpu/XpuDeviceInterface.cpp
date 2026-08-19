@@ -292,10 +292,12 @@ void XpuDeviceInterface::initialize_video_decoding(
 
   if (xpu::cpu_fallback()) {
     ensure_cpu_interface();
-    cpu_interface_->initialize_video_decoding(
+    cpu_interface_->initialize_video(
         av_stream,
         av_format_ctx,
-        VideoStreamOptions());
+        VideoStreamOptions(),
+        /*transforms=*/{}, 
+        /*resized_output_dims=*/std::nullopt);
   }
 }
 
