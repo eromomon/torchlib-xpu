@@ -42,7 +42,7 @@ pip install torchlib-xpu \
 
 * Install oneAPI [2026.0]
 
-* Install FFmpeg development environment with enabled VAAPI hardware acceleration. For example:
+* Install FFmpeg development environment with enabled VAAPI hardware acceleration. This is the minimal configuration required for hardware codecs to be functional. For software fallback support, FFmpeg needs to be built with enabled software codecs such as x264, x265, etc.:
 
   * By installing FFmpeg provided by your Linux distribution. For Ubuntu:
 
@@ -57,7 +57,7 @@ apt-get update && apt-get install -y \
     libswscale-dev
 ```
 
-  * By self-building FFmpeg from sources:
+  * By self-building FFmpeg from sources, ensuring the minimal configuration required for hardware codecs to be functional. For software fallback support, FFmpeg needs to be built with enabled software codecs such as x264, x265, etc.:
 
 ```
 git clone https://git.ffmpeg.org/ffmpeg.git && cd ffmpeg
