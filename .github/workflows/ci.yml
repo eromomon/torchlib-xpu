@@ -266,7 +266,12 @@ jobs:
           git \
           gpg \
           software-properties-common \
-          wget
+          wget \
+          build-essential \
+          nasm \
+          yasm \
+          pkg-config \
+          libva-dev
         git config --global user.email "nobody@intel.com"
         git config --global user.name "Nobody"
     - name: 'Download wheels'
@@ -298,12 +303,30 @@ jobs:
         # echo "Snapshot: 20260624T090400Z" >> /etc/apt/sources.list.d/kobuk-team-ubuntu-intel-graphics-noble.sources
         # apt-get update
         apt-get install -y \
-          ffmpeg \
           libva2 \
           libze1 \
           libze-intel-gpu1 \
           intel-media-va-driver-non-free \
-          intel-opencl-icd \
+          intel-opencl-icd
+    - name: 'Build FFmpeg from source'
+      env: 
+        FFMPEG_PREFIX: ${{ github.workspace }}/_install
+      run: |
+        git clone --depth 1 branch ${{ meatrix.ffmpeg-version }} \
+          https://git.ffmpeg.org/ffmpeg.git _ffmpeg_src
+        cd _ffmpeg_src
+        .configure \
+          --prefix="$FFMPEG_PREFIX" \
+          --libdir="$FFMPEG_PEFIX/lib" \
+          --disable-static \
+          --disable-stripping \
+          --disable-doc \
+          --enable-shared \
+          --enable-vaapi
+        make -j$(nproc)
+        make install
+        echo "PKG_CONFIG_PATH=$FFMPEG_PREFIX/lib/pkgconfig" >> $GITHUB_PATH
+        echo "LD_LIBRARY_PATH=$FFMPEG_PREFIX/lib:$LD_LYBRARY_PATH" >> $GITHUB_ENV
     - name: 'Print FFmpeg version'
       run: |
         ffmpeg -version
