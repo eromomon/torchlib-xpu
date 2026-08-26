@@ -312,7 +312,7 @@ jobs:
       env: 
         FFMPEG_PREFIX: ${{ github.workspace }}/_install
       run: |
-        git clone --depth 1 branch ${{ meatrix.ffmpeg-version }} \
+        git clone --depth 1 branch ${{ matrix.ffmpeg-version }} \
           https://git.ffmpeg.org/ffmpeg.git _ffmpeg_src
         cd _ffmpeg_src
         .configure \
