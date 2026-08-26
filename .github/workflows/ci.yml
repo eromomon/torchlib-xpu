@@ -115,8 +115,8 @@ jobs:
     - name: 'Build the project'
       env:
         TORCHCODEC_FFMPEG6_INSTALL_PREFIX: ${{ github.workspace }}/_install/ffmpeg-n6.1.4
-        TORCHCODEC_FFMPEG7_INSTALL_PREFIX: ${{ github.workspace }}/_install/ffmpeg-n7.1.3
-        TORCHCODEC_FFMPEG8_INSTALL_PREFIX: ${{ github.workspace }}/_install/ffmpeg-n8.0.1
+        # TORCHCODEC_FFMPEG7_INSTALL_PREFIX: ${{ github.workspace }}/_install/ffmpeg-n7.1.3
+        # TORCHCODEC_FFMPEG8_INSTALL_PREFIX: ${{ github.workspace }}/_install/ffmpeg-n8.0.1
         TORCHCODEC_FFMPEG9_INSTALL_PREFIX: ${{ github.workspace }}/_install/ffmpeg-n9.0.1
       run: |
         source /opt/intel/oneapi/setvars.sh
@@ -248,6 +248,7 @@ jobs:
       FORCE_CPU_FALLBACK: ${{ matrix.force_cpu_fallback == true }}
       TORCHCODEC_XPU_LOG_LEVEL: '3'  # info
       WHEELS: torchlib-${{ matrix.python-version }}-wheels
+      FFMPEG_PREFIX: ${{ github.workspace }}/_install
     steps:
     - name: 'Cleanup'
       run: |
@@ -270,7 +271,6 @@ jobs:
           wget \
           build-essential \
           nasm \
-          yasm \
           pkg-config \
           libva-dev
         git config --global user.email "nobody@intel.com"
@@ -314,13 +314,11 @@ jobs:
       with: 
         repository: FFmpeg/FFmpeg 
         ref: ${{ matrix.ffmpeg-version }} 
-    - name: 'Build FFmpeg from source'
-      env: 
-        FFMPEG_PREFIX: ${{ github.workspace }}/_install
+    - name: 'Configure FFmpeg from source'
       run: |
         ./configure \
           --prefix="$FFMPEG_PREFIX" \
-          --libdir="$FFMPEG_PEFIX/lib" \
+          --libdir="$FFMPEG_PREFIX/lib" \
           --disable-static \ 
           --disable-stripping \ 
           --disable-doc \ 
@@ -332,6 +330,8 @@ jobs:
           --enable-libx264 \ 
           --enable-libx265 \ 
           --enable-libvpx 
+    - name: 'Build and install FFmpeg'
+      run: |
         make -j$(nproc)
         make install
         echo "$FFMPEG_PREFIX/bin" >> $GITHUB_PATH
