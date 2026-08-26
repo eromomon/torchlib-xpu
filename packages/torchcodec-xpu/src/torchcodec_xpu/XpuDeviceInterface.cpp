@@ -481,7 +481,6 @@ void XpuDeviceInterface::convert_av_frame_to_frame_output(
         int_array_ref_to_string(shape));
     dst = pre_allocated_output_tensor.value();
   } else {
-    
     // Explicitly load the version defined in facebook::torchcodec::xpu
     // namespace as facebook::torchcodec defines the same but with the linkage
     // type which we can't use.

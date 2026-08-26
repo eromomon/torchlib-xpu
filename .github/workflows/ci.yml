@@ -318,7 +318,6 @@ jobs:
       env: 
         FFMPEG_PREFIX: ${{ github.workspace }}/_install
       run: |
-        cd FFmpeg
         ./configure \
           --prefix="$FFMPEG_PREFIX" \
           --libdir="$FFMPEG_PEFIX/lib" \
