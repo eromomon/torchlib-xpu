@@ -218,9 +218,10 @@ jobs:
         # Ubuntu 26.04 comes with ffmpeg version 8
         image: [ 'ubuntu:24.04', 'ubuntu:26.04' ]
         # Testing in minimum and maximum supported versions of python.
-        python-version: [ '3.10', '3.11', '3.12', '3.13', '3.14' ]
+        python-version: [ '3.10', '3.14' ]
         # TODO: re-enable dg2 runner after https://github.com/intel/torchlib-xpu/issues/94
         runner: [ 'bmg', 'dg2' ]
+        ffmpeg-version: [ 'n6.1.4', 'n9.0.1' ]
         # Default fallback value for standard matrix combinations
         cpu_fallback: [ false ]  # fallback not allowed
         force_cpu_fallback: [ false ]
@@ -308,25 +309,34 @@ jobs:
           libze-intel-gpu1 \
           intel-media-va-driver-non-free \
           intel-opencl-icd
+    - name: 'Checkout'
+      uses: actions/checkout@v7 
+      with: 
+        repository: FFmpeg/FFmpeg 
+        ref: ${{ matrix.ffmpeg-version }} 
     - name: 'Build FFmpeg from source'
       env: 
         FFMPEG_PREFIX: ${{ github.workspace }}/_install
       run: |
-        git clone --depth 1 branch ${{ matrix.ffmpeg-version }} \
-          https://git.ffmpeg.org/ffmpeg.git _ffmpeg_src
-        cd _ffmpeg_src
-        .configure \
+        cd FFmpeg
+        ./configure \
           --prefix="$FFMPEG_PREFIX" \
           --libdir="$FFMPEG_PEFIX/lib" \
-          --disable-static \
-          --disable-stripping \
-          --disable-doc \
-          --enable-shared \
-          --enable-vaapi
+          --disable-static \ 
+          --disable-stripping \ 
+          --disable-doc \ 
+          --enable-shared \ 
+          --enable-vaapi \ 
+          --enable-libmp3lame \ 
+          --enable-gpl \ 
+          --enable-libaom \ 
+          --enable-libx264 \ 
+          --enable-libx265 \ 
+          --enable-libvpx 
         make -j$(nproc)
         make install
-        echo "PKG_CONFIG_PATH=$FFMPEG_PREFIX/lib/pkgconfig" >> $GITHUB_PATH
-        echo "LD_LIBRARY_PATH=$FFMPEG_PREFIX/lib:$LD_LYBRARY_PATH" >> $GITHUB_ENV
+        echo "$FFMPEG_PREFIX/bin" >> $GITHUB_PATH
+        echo "LD_LIBRARY_PATH=$FFMPEG_PREFIX/lib:$LD_LIBRARY_PATH" >> $GITHUB_ENV
     - name: 'Print FFmpeg version'
       run: |
         ffmpeg -version
