@@ -291,11 +291,12 @@ jobs:
         ref: v0.16.0
         path: torchcodec
         clean: true
-    - name: 'Checkout'
+    - name: 'Checkout ffmpeg'
       uses: actions/checkout@v7 
       with: 
         repository: FFmpeg/FFmpeg 
         ref: ${{ matrix.ffmpeg-version }}
+        path: ffmpeg
     - name: 'Patch torchcodec'
       working-directory: torchcodec
       run: |
@@ -313,8 +314,15 @@ jobs:
           libze1 \
           libze-intel-gpu1 \
           intel-media-va-driver-non-free \
-          intel-opencl-icd 
+          intel-opencl-icd \
+          libaom-dev \
+          libmp3lame-dev \
+          libx264-dev \
+          libx265-dev \
+          libva-dev \
+          libvpx-dev
     - name: 'Configure FFmpeg from source'
+      working-directory: ffmpeg
       run: |
         ./configure \
           --prefix="$FFMPEG_PREFIX" \
@@ -329,14 +337,9 @@ jobs:
           --enable-libaom \
           --enable-libx264 \
           --enable-libx265 \
-          --enable-libvpx \
-          --libaom-dev \
-          --libmp3lame-dev \
-          --libx264-dev \
-          --libx265-dev \
-          --libva-dev \
-          --libvpx-dev
+          --enable-libvpx
     - name: 'Build and install FFmpeg'
+      working-directory: ffmpeg
       run: |
         make -j$(nproc)
         make install
