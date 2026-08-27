@@ -291,13 +291,18 @@ jobs:
         ref: v0.16.0
         path: torchcodec
         clean: true
+    - name: 'Checkout'
+      uses: actions/checkout@v7 
+      with: 
+        repository: FFmpeg/FFmpeg 
+        ref: ${{ matrix.ffmpeg-version }}
     - name: 'Patch torchcodec'
       working-directory: torchcodec
       run: |
         rm -rf .git/rebase-apply
         git am ../torchlib-xpu/packages/torchcodec-xpu/patches/0001-Add-XPU-support-to-tests.patch
         git am ../torchlib-xpu/packages/torchcodec-xpu/patches/0002-Add-XPU-support-to-video-encoder-tests.patch
-    - name: 'Install FFmpeg and Intel drivers'
+    - name: 'Install Intel drivers'
       run: |
         add-apt-repository -y ppa:kobuk-team/intel-graphics
         # Uncomment below to install packages available at specific date
@@ -308,28 +313,29 @@ jobs:
           libze1 \
           libze-intel-gpu1 \
           intel-media-va-driver-non-free \
-          intel-opencl-icd
-    - name: 'Checkout'
-      uses: actions/checkout@v7 
-      with: 
-        repository: FFmpeg/FFmpeg 
-        ref: ${{ matrix.ffmpeg-version }} 
+          intel-opencl-icd 
     - name: 'Configure FFmpeg from source'
       run: |
         ./configure \
           --prefix="$FFMPEG_PREFIX" \
           --libdir="$FFMPEG_PREFIX/lib" \
-          --disable-static \ 
-          --disable-stripping \ 
-          --disable-doc \ 
-          --enable-shared \ 
-          --enable-vaapi \ 
-          --enable-libmp3lame \ 
-          --enable-gpl \ 
-          --enable-libaom \ 
-          --enable-libx264 \ 
-          --enable-libx265 \ 
-          --enable-libvpx 
+          --disable-static \
+          --disable-stripping \
+          --disable-doc \
+          --enable-shared \
+          --enable-vaapi \
+          --enable-libmp3lame \
+          --enable-gpl \
+          --enable-libaom \
+          --enable-libx264 \
+          --enable-libx265 \
+          --enable-libvpx \
+          --libaom-dev \
+          --libmp3lame-dev \
+          --libx264-dev \
+          --libx265-dev \
+          --libva-dev \
+          --libvpx-dev
     - name: 'Build and install FFmpeg'
       run: |
         make -j$(nproc)
