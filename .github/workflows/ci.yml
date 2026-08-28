@@ -214,18 +214,34 @@ jobs:
     if: needs.identify-changes.outputs.torchcodec-xpu == 'true'
     strategy:
       matrix:
-        # Ubuntu 24.04 comes with ffmpeg version 6
-        # Ubuntu 26.04 comes with ffmpeg version 8
         image: [ 'ubuntu:24.04', 'ubuntu:26.04' ]
         # Testing in minimum and maximum supported versions of python.
-        python-version: [ '3.10', '3.11', '3.12', '3.13', '3.14' ]
-        # TODO: re-enable dg2 runner after https://github.com/intel/torchlib-xpu/issues/94
+        python-version: [ '3.10']
         runner: [ 'bmg', 'dg2' ]
+        # Testing n8 as (probably) most popular version (it's available in Ubuntu 26.04)
+        ffmpeg-version: [ 'n6.1.4', 'n7.1.3', 'n8.0.1', 'n9.0.1' ]
         # Default fallback value for standard matrix combinations
         cpu_fallback: [ false ]  # fallback not allowed
         force_cpu_fallback: [ false ]
 
         include:
+        # This verifies all other supported version of python
+        - image: 'ubuntu:26.04'
+          python-version: '3.11'
+          runner: 'bmg'
+          ffmpeg-version: 'n8.0.1'
+        - image: 'ubuntu:26.04'
+          python-version: '3.12'
+          runner: 'bmg'
+          ffmpeg-version: 'n8.0.1'
+        - image: 'ubuntu:26.04'
+          python-version: '3.13'
+          runner: 'bmg'
+          ffmpeg-version: 'n8.0.1'
+        - image: 'ubuntu:26.04'
+          python-version: '3.14'
+          runner: 'bmg'
+          ffmpeg-version: 'n8.0.1'
         # This verifies default behavior when CPU fallback is allowed and not forced
         - image: 'ubuntu:26.04'
           python-version: '3.14'
@@ -247,6 +263,7 @@ jobs:
       FORCE_CPU_FALLBACK: ${{ matrix.force_cpu_fallback == true }}
       TORCHCODEC_XPU_LOG_LEVEL: '3'  # info
       WHEELS: torchlib-${{ matrix.python-version }}-wheels
+      FFMPEG_PREFIX: ${{ github.workspace }}/_install
     steps:
     - name: 'Cleanup'
       run: |
@@ -257,6 +274,8 @@ jobs:
       run: |
         # For https://github.com/actions/setup-python/issues/1087
         echo "AGENT_TOOLSDIRECTORY=$GITHUB_WORKSPACE/_tools" >> $GITHUB_ENV
+    # This step installs basic prerequisites to make Git and external APT repository
+    # working inside the container.
     - name: 'Install prerequisites'
       run: |
         apt-get update
@@ -285,25 +304,62 @@ jobs:
         ref: v0.16.0
         path: torchcodec
         clean: true
+    - name: 'Checkout ffmpeg'
+      uses: actions/checkout@v7 
+      with: 
+        repository: FFmpeg/FFmpeg 
+        ref: ${{ matrix.ffmpeg-version }}
+        path: ffmpeg
     - name: 'Patch torchcodec'
       working-directory: torchcodec
       run: |
         rm -rf .git/rebase-apply
         git am ../torchlib-xpu/packages/torchcodec-xpu/patches/0001-Add-XPU-support-to-tests.patch
         git am ../torchlib-xpu/packages/torchcodec-xpu/patches/0002-Add-XPU-support-to-video-encoder-tests.patch
-    - name: 'Install FFmpeg and Intel drivers'
+    - name: 'Install Intel drivers, FFmpeg and test prerequisites'
       run: |
         add-apt-repository -y ppa:kobuk-team/intel-graphics
         # Uncomment below to install packages available at specific date
         # echo "Snapshot: 20260624T090400Z" >> /etc/apt/sources.list.d/kobuk-team-ubuntu-intel-graphics-noble.sources
         # apt-get update
         apt-get install -y \
-          ffmpeg \
-          libva2 \
-          libze1 \
-          libze-intel-gpu1 \
+          build-essential \
           intel-media-va-driver-non-free \
           intel-opencl-icd \
+          libaom-dev \
+          libmp3lame-dev \
+          libva-dev \
+          libva2 \
+          libvpx-dev \
+          libx264-dev \
+          libx265-dev \
+          libze-intel-gpu1 \
+          libze1 \
+          nasm \
+          pkg-config
+    - name: 'Configure FFmpeg from source'
+      working-directory: ffmpeg
+      run: |
+        ./configure \
+          --prefix="$FFMPEG_PREFIX" \
+          --libdir="$FFMPEG_PREFIX/lib" \
+          --disable-static \
+          --disable-stripping \
+          --disable-doc \
+          --enable-shared \
+          --enable-vaapi \
+          --enable-libmp3lame \
+          --enable-gpl \
+          --enable-libaom \
+          --enable-libx264 \
+          --enable-libx265 \
+          --enable-libvpx
+    - name: 'Build and install FFmpeg'
+      working-directory: ffmpeg
+      run: |
+        make -j$(nproc) && make install
+        echo "$FFMPEG_PREFIX/bin" >> $GITHUB_PATH
+        echo "LD_LIBRARY_PATH=$FFMPEG_PREFIX/lib:$LD_LIBRARY_PATH" >> $GITHUB_ENV
     - name: 'Print FFmpeg version'
       run: |
         ffmpeg -version
