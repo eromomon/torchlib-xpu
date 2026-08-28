@@ -214,12 +214,9 @@ jobs:
     if: needs.identify-changes.outputs.torchcodec-xpu == 'true'
     strategy:
       matrix:
-        # Ubuntu 24.04 comes with ffmpeg version 6
-        # Ubuntu 26.04 comes with ffmpeg version 8
         image: [ 'ubuntu:24.04', 'ubuntu:26.04' ]
         # Testing in minimum and maximum supported versions of python.
         python-version: [ '3.10', '3.14' ]
-        # TODO: re-enable dg2 runner after https://github.com/intel/torchlib-xpu/issues/94
         runner: [ 'bmg', 'dg2' ]
         ffmpeg-version: [ 'n6.1.4', 'n9.0.1' ]
         # Default fallback value for standard matrix combinations
@@ -259,6 +256,8 @@ jobs:
       run: |
         # For https://github.com/actions/setup-python/issues/1087
         echo "AGENT_TOOLSDIRECTORY=$GITHUB_WORKSPACE/_tools" >> $GITHUB_ENV
+    # This step installs basic prerequisites to make Git and external APT repository
+    # working inside the container.
     - name: 'Install prerequisites'
       run: |
         apt-get update
@@ -268,11 +267,7 @@ jobs:
           git \
           gpg \
           software-properties-common \
-          wget \
-          build-essential \
-          nasm \
-          pkg-config \
-          libva-dev
+          wget
         git config --global user.email "nobody@intel.com"
         git config --global user.name "Nobody"
     - name: 'Download wheels'
@@ -303,7 +298,7 @@ jobs:
         rm -rf .git/rebase-apply
         git am ../torchlib-xpu/packages/torchcodec-xpu/patches/0001-Add-XPU-support-to-tests.patch
         git am ../torchlib-xpu/packages/torchcodec-xpu/patches/0002-Add-XPU-support-to-video-encoder-tests.patch
-    - name: 'Install Intel drivers'
+    - name: 'Install Intel drivers, FFmpeg and test prerequisites'
       run: |
         add-apt-repository -y ppa:kobuk-team/intel-graphics
         # Uncomment below to install packages available at specific date
@@ -320,7 +315,10 @@ jobs:
           libx264-dev \
           libx265-dev \
           libva-dev \
-          libvpx-dev
+          libvpx-dev \
+          build-essential \
+          nasm \
+          pkg-config
     - name: 'Configure FFmpeg from source'
       working-directory: ffmpeg
       run: |
@@ -341,8 +339,7 @@ jobs:
     - name: 'Build and install FFmpeg'
       working-directory: ffmpeg
       run: |
-        make -j$(nproc)
-        make install
+        make -j$(nproc) && make install
         echo "$FFMPEG_PREFIX/bin" >> $GITHUB_PATH
         echo "LD_LIBRARY_PATH=$FFMPEG_PREFIX/lib:$LD_LIBRARY_PATH" >> $GITHUB_ENV
     - name: 'Print FFmpeg version'
