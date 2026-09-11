@@ -6,6 +6,7 @@
 #include <cstdio>
 #include <string>
 #include <unordered_map>
+#include <filesystem>
 
 #include <level_zero/ze_api.h>
 #include <va/va_drmcommon.h>
@@ -32,6 +33,10 @@ const char* LOG_LEVEL = std::getenv("TORCHCODEC_XPU_LOG_LEVEL");
 const char* USE_SYCL_KERNELS = std::getenv("USE_SYCL_KERNELS");
 const char* CPU_FALLBACK = std::getenv("CPU_FALLBACK");
 const char* FORCE_CPU_FALLBACK = std::getenv("FORCE_CPU_FALLBACK");
+
+inline bool file_exists(const std::string& path){
+  return ::access(path.c_str(), F_OK) == 0;
+}
 
 static bool g_xpu = register_device_interface(
     DeviceInterfaceKey(StableDeviceType::XPU),
@@ -134,15 +139,34 @@ sycl::ext::oneapi::experimental::architecture getArchitecture(
 
 // Resolves the VAAPI render-node path this XPU device should open.
 std::string resolveRenderD(const StableDevice& device) {
-  std::string renderD = "/dev/dri/renderD128";
+  const std::string defaultRenderD = "/dev/dri/renderD128";
   int deviceIndex = get_device_index(device);
   sycl::device syclDevice = c10::xpu::get_raw_device(deviceIndex);
   if (syclDevice.has(sycl::aspect::ext_intel_pci_address)) {
     auto BDF =
         syclDevice.get_info<sycl::ext::intel::info::device::pci_address>();
-    renderD = "/dev/dri/by-path/pci-" + BDF + "-render";
+    std::string byPath = "/dev/dri/by-path/pci-" + BDF + "-render";
+    if (file_exists(byPath)) {
+      DEBUG_LOG(xpu::INFO, "Using VAAPI from by-path: " << byPath);
+      return byPath;
+    }
+
+    std::string sysDrmPath = "/sys/bus/pci/devices/" + BDF + "/drm";
+    if (std::filesystem::exists(sysDrmPath)) {
+      for (const auto& entry : std::filesystem::directory_iterator(sysDrmPath)) {
+        std::string filename = entry.path().filename().string();
+        if (filename.rfind("renderD", 0) == 0) {
+          std::string devPath = "/dev/dri/" + filename;
+          if (file_exists(devPath)) {
+            DEBUG_LOG(xpu::INFO, "Using VAAPI from sysfs DRM path: " << devPath);
+            return devPath;
+          }
+        }
+      }
+    }
   }
-  return renderD;
+  DEBUG_LOG(xpu::INFO, "Using default VAAPI render node: " << defaultRenderD);
+  return defaultRenderD;
 }
 
 UniqueAVBufferRef getVaapiContext(const StableDevice& device) {
