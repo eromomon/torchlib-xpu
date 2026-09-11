@@ -147,7 +147,7 @@ std::string resolveRenderD(const StableDevice& device) {
         syclDevice.get_info<sycl::ext::intel::info::device::pci_address>();
     std::string byPath = "/dev/dri/by-path/pci-" + BDF + "-render";
     if (file_exists(byPath)) {
-      DEBUG_LOG(xpu::INFO, "Using VAAPI from by-path: " << byPath);
+      DEBUG_LOG(xpu::INFO, "Found device by-path: " << byPath);
       return byPath;
     }
 
@@ -158,7 +158,7 @@ std::string resolveRenderD(const StableDevice& device) {
         if (filename.rfind("renderD", 0) == 0) {
           std::string devPath = "/dev/dri/" + filename;
           if (file_exists(devPath)) {
-            DEBUG_LOG(xpu::INFO, "Using VAAPI from sysfs DRM path: " << devPath);
+            DEBUG_LOG(xpu::INFO, "Found device from sysfs: " << devPath);
             return devPath;
           }
         }
