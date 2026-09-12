@@ -6,6 +6,7 @@
 #include <cstdio>
 #include <string>
 #include <unordered_map>
+#include <filesystem>
 
 #include <level_zero/ze_api.h>
 #include <va/va_drmcommon.h>
@@ -134,15 +135,34 @@ sycl::ext::oneapi::experimental::architecture getArchitecture(
 
 // Resolves the VAAPI render-node path this XPU device should open.
 std::string resolveRenderD(const StableDevice& device) {
-  std::string renderD = "/dev/dri/renderD128";
+  const std::string defaultRenderD = "/dev/dri/renderD128";
   int deviceIndex = get_device_index(device);
   sycl::device syclDevice = c10::xpu::get_raw_device(deviceIndex);
   if (syclDevice.has(sycl::aspect::ext_intel_pci_address)) {
     auto BDF =
         syclDevice.get_info<sycl::ext::intel::info::device::pci_address>();
-    renderD = "/dev/dri/by-path/pci-" + BDF + "-render";
+    std::string byPath = "/dev/dri/by-path/pci-" + BDF + "-render";
+    if (std::filesystem::exists(byPath)) {
+      DEBUG_LOG(xpu::INFO, "Found device by-path: " << byPath);
+      return byPath;
+    }
+
+    std::string sysDrmPath = "/sys/bus/pci/devices/" + BDF + "/drm";
+    if (std::filesystem::exists(sysDrmPath)) {
+      for (const auto& entry : std::filesystem::directory_iterator(sysDrmPath)) {
+        std::string filename = entry.path().filename().string();
+        if (filename.rfind("renderD", 0) == 0) {
+          std::string devPath = "/dev/dri/" + filename;
+          if (std::filesystem::exists(devPath)) {
+            DEBUG_LOG(xpu::INFO, "Found device from sysfs: " << devPath);
+            return devPath;
+          }
+        }
+      }
+    }
   }
-  return renderD;
+  DEBUG_LOG(xpu::INFO, "Using default VAAPI render node: " << defaultRenderD);
+  return defaultRenderD;
 }
 
 UniqueAVBufferRef getVaapiContext(const StableDevice& device) {
