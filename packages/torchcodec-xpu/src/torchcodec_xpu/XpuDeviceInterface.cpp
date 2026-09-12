@@ -34,10 +34,6 @@ const char* USE_SYCL_KERNELS = std::getenv("USE_SYCL_KERNELS");
 const char* CPU_FALLBACK = std::getenv("CPU_FALLBACK");
 const char* FORCE_CPU_FALLBACK = std::getenv("FORCE_CPU_FALLBACK");
 
-inline bool file_exists(const std::string& path){
-  return ::access(path.c_str(), F_OK) == 0;
-}
-
 static bool g_xpu = register_device_interface(
     DeviceInterfaceKey(StableDeviceType::XPU),
     [](const StableDevice& device) { return new XpuDeviceInterface(device); });
@@ -146,7 +142,7 @@ std::string resolveRenderD(const StableDevice& device) {
     auto BDF =
         syclDevice.get_info<sycl::ext::intel::info::device::pci_address>();
     std::string byPath = "/dev/dri/by-path/pci-" + BDF + "-render";
-    if (file_exists(byPath)) {
+    if (std::filesystem::exists(byPath)) {
       DEBUG_LOG(xpu::INFO, "Found device by-path: " << byPath);
       return byPath;
     }
@@ -157,7 +153,7 @@ std::string resolveRenderD(const StableDevice& device) {
         std::string filename = entry.path().filename().string();
         if (filename.rfind("renderD", 0) == 0) {
           std::string devPath = "/dev/dri/" + filename;
-          if (file_exists(devPath)) {
+          if (std::filesystem::exists(devPath)) {
             DEBUG_LOG(xpu::INFO, "Found device from sysfs: " << devPath);
             return devPath;
           }
