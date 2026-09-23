@@ -408,11 +408,7 @@ jobs:
         python -c "import torch; assert torch.xpu.is_available(), 'XPU (Intel GPU) is not available'"
     - name: 'DEBUG: Print torchcodec extension library sonames'
       run: |
-        python -c "import torchcodec, os, glob; print(glob.glob(os.path.join(os.path.dirname(torchcodec.__file__), '*.so*')))"
-        for so in $(python -c "import torchcodec, os, glob; print(' '.join(glob.glob(os.path.join(os.path.dirname(torchcodec.__file__), '*.so*'))))"); do
-          echo "=== $so ==="
-          ldd "$so" | grep -i libav
-        done
+        ldd "$(python -c 'import torchcodec, os; print(os.path.dirname(torchcodec.__file__))')"/libtorchcodec_custom_ops8.so 2>&1 | grep -i libav
     - name: 'Test'
       working-directory: torchcodec
       run: |
