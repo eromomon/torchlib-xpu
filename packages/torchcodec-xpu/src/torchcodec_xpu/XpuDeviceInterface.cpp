@@ -1040,6 +1040,7 @@ UniqueAVFrame XpuDeviceInterface::convert_tensor_to_av_frame_for_encoding_with_c
   vaFrame->colorspace  = codec_context->colorspace;
   vaFrame->color_range = codec_context->color_range;
   return vaFrame;
+  
 }
 
 } // namespace facebook::torchcodec
