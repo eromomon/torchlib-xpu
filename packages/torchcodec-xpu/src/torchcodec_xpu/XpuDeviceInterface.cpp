@@ -146,7 +146,6 @@ std::string resolveRenderD(const StableDevice& device) {
       DEBUG_LOG(xpu::INFO, "Found device by-path: " << byPath);
       return byPath;
     }
-
     std::string sysDrmPath = "/sys/bus/pci/devices/" + BDF + "/drm";
     if (std::filesystem::exists(sysDrmPath)) {
       for (const auto& entry : std::filesystem::directory_iterator(sysDrmPath)) {
