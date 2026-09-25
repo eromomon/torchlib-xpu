@@ -270,6 +270,7 @@ jobs:
         rm -rf .torchlib-xpu-venv
         rm -rf _wheels
         rm -rf _tools
+        rm -rf _install ffmpeg
     - name: 'Set AGENT_TOOLSDIRECTORY'
       run: |
         # For https://github.com/actions/setup-python/issues/1087
