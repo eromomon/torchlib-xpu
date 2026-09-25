@@ -217,9 +217,9 @@ jobs:
         # TEMP DEBUG: matrix pinned to the single failing combination for repro.
         # Restore the full matrix below once the mp3 encoder investigation is done.
         image: [ 'ubuntu:26.04' ]
-        python-version: [ '3.10', '3.11' ]
+        python-version: [ '3.10' ]
         runner: [ 'bmg' ]
-        ffmpeg-version: [ 'n7.1.3', 'n8.0.1' ]
+        ffmpeg-version: [ 'n6.1.4' ]
         cpu_fallback: [ false ]  # fallback not allowed
         force_cpu_fallback: [ false ]
 

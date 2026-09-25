@@ -155,11 +155,11 @@ std::string resolveRenderD(const StableDevice& device) {
   if (syclDevice.has(sycl::aspect::ext_intel_pci_address)) {
     auto BDF =
          syclDevice.get_info<sycl::ext::intel::info::device::pci_address>();
-    std::string byPath = "/dev/dri/by-path/pci-" + BDF + "-render";
-    if (std::filesystem::exists(byPath)) {
-      DEBUG_LOG(xpu::INFO, "Found device by-path: " << byPath);
-      return byPath;
-    }
+    //std::string byPath = "/dev/dri/by-path/pci-" + BDF + "-render";
+    //if (std::filesystem::exists(byPath)) {
+    //  DEBUG_LOG(xpu::INFO, "Found device by-path: " << byPath);
+    //  return byPath;
+    //}
 
     std::string sysDrmPath = "/sys/bus/pci/devices/" + BDF + "/drm";
     if (std::filesystem::exists(sysDrmPath)) {
