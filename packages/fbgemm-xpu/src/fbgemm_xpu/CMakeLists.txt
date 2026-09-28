@@ -1,41 +1,3 @@
-cmake_minimum_required(VERSION 3.18)
-set(CMAKE_CXX_STANDARD 17)
-set(CMAKE_CXX_STANDARD_REQUIRED ON)
-
-set(PYBIND11_FINDPYTHON ON)
-# Prefer the active virtual environment Python when available.
-set(Python3_FIND_VIRTUALENV FIRST)
-if(DEFINED ENV{VIRTUAL_ENV})
-    set(Python3_ROOT_DIR "$ENV{VIRTUAL_ENV}")
-    set(Python3_EXECUTABLE "$ENV{VIRTUAL_ENV}/bin/python")
-endif()
-
-find_package(Python3 REQUIRED COMPONENTS Interpreter Development.Module)
-find_package(pybind11 REQUIRED)
-find_package(Torch REQUIRED)
-
-# --------------------------------------------------------------------------
-# SYCL backend: required for fbgemm-xpu. All kernels are SYCL-based, so the
-# Intel oneAPI compiler (icpx) is mandatory.
-# --------------------------------------------------------------------------
-if(NOT CMAKE_CXX_COMPILER MATCHES "icpx")
-    message(FATAL_ERROR "fbgemm-xpu requires Intel oneAPI compiler (icpx) with SYCL support")
-endif()
-message(STATUS "Intel compiler detected: SYCL kernels enabled")
-
-# --------------------------------------------------------------------------
-# XPU architecture: currently tested only on PVC (Ponte Vecchio).
-# --------------------------------------------------------------------------
-if(NOT "$ENV{TORCH_XPU_ARCH_LIST}" STREQUAL "")
-    set(TORCH_XPU_ARCH_LIST "$ENV{TORCH_XPU_ARCH_LIST}")
-else()
-    set(TORCH_XPU_ARCH_LIST "pvc")
-endif()
-message(STATUS "Building for XPU architectures: ${TORCH_XPU_ARCH_LIST}")
-
-set(SYCL_TARGETS -fsycl-targets=spir64_gen,spir64)
-set(SYCL_DEVICE_LIST -Xs "-device ${TORCH_XPU_ARCH_LIST} -options -cl-poison-unsupported-fp64-kernels")
-
 # --------------------------------------------------------------------------
 # Sources: keep build inputs explicit so new files are reviewed when added.
 # Add new host and SYCL kernel .cpp files to host_sources as operators are
@@ -46,9 +8,14 @@ set(host_sources
     ${CMAKE_CURRENT_SOURCE_DIR}/sparse_async_cumsum.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/split_embeddings_utils_xpu.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/sycl_kernels/block_bucketize_sparse_features.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/sycl_kernels/dense_to_jagged_forward.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/sycl_kernels/embedding_bounds_check_kernel.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/sycl_kernels/expand_into_jagged_permute_kernel.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/sycl_kernels/invert_permute_kernel.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/sycl_kernels/jagged_dense_elementwise_add_jagged_output.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/sycl_kernels/jagged_index_select_2d.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/sycl_kernels/jagged_to_padded_dense_backward.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/sycl_kernels/jagged_to_padded_dense_forward.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/sycl_kernels/permute_1d_sparse_data.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/sycl_kernels/permute_2d_sparse_data.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/sycl_kernels/reorder_batched_ad.cpp
