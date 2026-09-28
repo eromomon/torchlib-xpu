@@ -268,9 +268,14 @@ jobs:
     steps:
     - name: 'Cleanup'
       run: |
+        # Workspaces persist on self-hosted runners and may get polluted with the
+        # previous states. Here we thuroughly clean up our worspace.
+        # 1. Remove virtual environment
         rm -rf .torchlib-xpu-venv
-        rm -rf _wheels
-        rm -rf _tools
+        # 2. Remove custom folders we've created for artifacts, builds, etc.
+        rm -rf _install _tools _wheels
+        # 3. Remove clone copies
+        rm -rf ffmpeg torchcodec torchlib-xpu
     - name: 'Set AGENT_TOOLSDIRECTORY'
       run: |
         # For https://github.com/actions/setup-python/issues/1087
@@ -304,7 +309,6 @@ jobs:
         repository: meta-pytorch/torchcodec
         ref: v0.16.0
         path: torchcodec
-        clean: true
     - name: 'Checkout ffmpeg'
       uses: actions/checkout@v7 
       with: 
@@ -314,7 +318,6 @@ jobs:
     - name: 'Patch torchcodec'
       working-directory: torchcodec
       run: |
-        rm -rf .git/rebase-apply
         git am ../torchlib-xpu/packages/torchcodec-xpu/patches/0001-Add-XPU-support-to-tests.patch
         git am ../torchlib-xpu/packages/torchcodec-xpu/patches/0002-Add-XPU-support-to-video-encoder-tests.patch
     - name: 'Install Intel drivers, FFmpeg and test prerequisites'
@@ -370,7 +373,6 @@ jobs:
         python-version: ${{ matrix.python-version }}
     - name: 'Create virtual environment'
       run: |
-        rm -rf .torchlib-xpu-venv
         python -m venv .torchlib-xpu-venv
         echo "$GITHUB_WORKSPACE/.torchlib-xpu-venv/bin" >> $GITHUB_PATH
     - name: 'Install torchcodec'
@@ -408,9 +410,14 @@ jobs:
     steps:
     - name: 'Cleanup'
       run: |
+        # Workspaces persist on self-hosted runners and may get polluted with the
+        # previous states. Here we thuroughly clean up our worspace.
+        # 1. Remove virtual environment
         rm -rf .torchlib-xpu-venv
-        rm -rf _wheels
-        rm -rf _tools
+        # 2. Remove custom folders we've created for artifacts, builds, etc.
+        rm -rf _install _tools _wheels
+        # 3. Remove clone copies
+        rm -rf fbgemm torchlib-xpu
     - name: Set AGENT_TOOLSDIRECTORY
       run: |
         # For https://github.com/actions/setup-python/issues/1087
@@ -442,7 +449,6 @@ jobs:
         repository: pytorch/FBGEMM
         ref: ${{ env.FBGEMM_VERSION }}
         path: fbgemm
-        clean: true
     - name: 'Install Intel drivers'
       run: |
         add-apt-repository -y ppa:kobuk-team/intel-graphics
@@ -456,7 +462,6 @@ jobs:
         python-version: ${{ matrix.python-version }}
     - name: 'Create virtual environment'
       run: |
-        rm -rf .torchlib-xpu-venv
         python -m venv .torchlib-xpu-venv
         echo "$GITHUB_WORKSPACE/.torchlib-xpu-venv/bin" >> $GITHUB_PATH
     - name: 'Install fbgemm-xpu'
@@ -476,7 +481,6 @@ jobs:
     - name: 'Patch upstream FBGEMM tests'
       working-directory: fbgemm
       run: |
-        rm -rf .git/rebase-apply
         git am ../torchlib-xpu/packages/fbgemm-xpu/patches/0001-Add-XPU-support-to-fbgemm-tests.patch
         unexpected=$(git diff --name-only "$FBGEMM_VERSION" HEAD | grep -v '^fbgemm_gpu/test/' || true)
         if [ -n "$unexpected" ]; then
