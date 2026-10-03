@@ -25,7 +25,17 @@ class XpuDeviceInterface : public DeviceInterface {
       const UniqueDecodingAVFormatContext& av_format_ctx,
       const VideoStreamOptions& video_stream_options) override;
 
+  void initialize_color_conversion(
+      const VideoStreamOptions& video_stream_options,
+      const std::vector<std::unique_ptr<Transform>>& transform,
+      const std::optional<FrameDims>& resized_output_dims) override;
+
   void register_hardware_device_with_codec(AVCodecContext* codec_context) override;
+
+  OutputDtype get_pre_allocation_dtype(
+    OutputDtype requested_dtype) const override;
+
+  std::string get_details() override;
 
   void convert_av_frame_to_frame_output(
       const AVFrame& av_frame,
@@ -51,8 +61,15 @@ class XpuDeviceInterface : public DeviceInterface {
   std::unique_ptr<DeviceInterface> cpu_interface_;
 
   VideoStreamOptions video_stream_options_;
-  AVRational time_base_;
+  // AVRational time_base_;
+
+  AVRational time_base_ = {1, AV_TIME_BASE};
   bool has_fp64_;
+
+  Rotation rotation_ = Rotation::NONE;
+  bool has_decode_frame_ = false;
+  bool using_cpu_fallback_ = false;
+
 
   UniqueAVBufferRef ctx_;
 

@@ -299,21 +299,39 @@ void XpuDeviceInterface::initialize(const SharedAVCodecContext& codec_context) {
 void XpuDeviceInterface::initialize_video_decoding(
     const AVStream* av_stream,
     const UniqueDecodingAVFormatContext& av_format_ctx,
-    const VideoStreamOptions& video_stream_options) {
+    [[maybe_unused]] const VideoStreamOptions& video_stream_options) {
   TORCH_CHECK(av_stream != nullptr, "av_stream is null");
   time_base_ = av_stream->time_base;
-  video_stream_options_ = video_stream_options;
+  // video_stream_options_ = video_stream_options;
+  rotation_ = rotation_from_degrees(get_rotation_from_stream(av_stream));
 
   if (xpu::cpu_fallback()) {
     ensure_cpu_interface();
-    cpu_interface_->initialize_video(
-        av_stream,
-        av_format_ctx,
-        VideoStreamOptions(),
-        /*transforms=*/{}, 
-        /*resized_output_dims=*/std::nullopt);
+    cpu_interface_ ->initialize_video_decoding(
+      av_stream, av_format_ctx, VideoStreamOptions());
+    //cpu_interface_->initialize_video(
+    //    av_stream,
+    //    av_format_ctx,
+    //    VideoStreamOptions(),
+    //    /*transforms=*/{}, 
+    //    /*resized_output_dims=*/std::nullopt);
   }
 }
+
+void XpuDeviceInterface::initialize_color_conversion(
+  const VideoStreamOptions& video_stream_options, 
+  [[maybe_unused]] const std::vector<std::unique_ptr<Transform>>& transforms, 
+  [[maybe_unused]] const std::optional<FrameDims>& resized_output_dims0) {
+    video_stream_options_ = video_stream_options;
+
+    if (xpu::cpu_fallback()){
+      ensure_cpu_interface();
+      cpu_interface_ ->initialize_color_conversion(
+        VideoStreamOptions(), /*transforms=*/{}, 
+        /*resized_output_dims=*/std::nullopt);
+    }
+  }
+
 
 void XpuDeviceInterface::register_hardware_device_with_codec(
     AVCodecContext* codec_context) {
@@ -449,6 +467,13 @@ void XpuDeviceInterface::convert_av_frame_to_frame_output(
     const AVFrame& av_frame,
     FrameOutput& frame_output,
     std::optional<torch::stable::Tensor> pre_allocated_output_tensor) {
+  has_decode_frame_ = true;
+
+  // Preallocated tensors has post-rotation dims
+  std::optional<torch::stable::Tensor> conversion_dst = 
+    (rotation_ == Rotation::NONE) ? pre_allocated_output_tensor : std::nullopt;
+
+
   if (av_frame.format != AV_PIX_FMT_VAAPI) {
     // The frame's format is AV_PIX_FMT_VAAPI if and only if its content is on
     // the GPU. In this branch, the frame is on the CPU. This is what FFmpeg VAAPI
@@ -467,23 +492,29 @@ void XpuDeviceInterface::convert_av_frame_to_frame_output(
     // Finally, we need to send the frame back to the GPU. Note that the
     // pre-allocated tensor is on the GPU, so we can't send that to the CPU
     // device interface. We copy it over here.
-    if (pre_allocated_output_tensor.has_value()) {
-      torch::stable::copy_(pre_allocated_output_tensor.value(), cpuFrameOutput.data);
-      frame_output.data = pre_allocated_output_tensor.value();
+    if (conversion_dst.has_value()) {
+      torch::stable::copy_(conversion_dst.value(), cpuFrameOutput.data);
+      frame_output.data = conversion_dst.value();
     } else {
       frame_output.data = torch::stable::to(cpuFrameOutput.data, device_);
     }
-    return;
-  }
 
-  TORCH_CHECK(
-      av_frame.format == AV_PIX_FMT_VAAPI,
-      "Expected format to be AV_PIX_FMT_VAAPI, got " +
-          std::string(av_get_pix_fmt_name((AVPixelFormat)av_frame.format)));
+    using_cpu_fallback_ = true;
+  } else {
+    // The frame is on the GPU, no CPU fallback needed.
+    using_cpu_fallback_ = false;
+
+  //  return;
+  //}
+
+  //TORCH_CHECK(
+  //    av_frame.format == AV_PIX_FMT_VAAPI,
+  //    "Expected format to be AV_PIX_FMT_VAAPI, got " +
+  //        std::string(av_get_pix_fmt_name((AVPixelFormat)av_frame.format)));
   auto frameDims = FrameDims(av_frame.height, av_frame.width);
   torch::stable::Tensor& dst = frame_output.data;
-  if (pre_allocated_output_tensor.has_value()) {
-    auto shape = pre_allocated_output_tensor.value().sizes();
+  if (conversion_dst.has_value()) {
+    auto shape = conversion_dst.value().sizes();
     TORCH_CHECK(
         (shape.size() == 3) && (shape[0] == frameDims.height) &&
 	    (shape[1] == frameDims.width) && (shape[2] == 3),
@@ -493,7 +524,7 @@ void XpuDeviceInterface::convert_av_frame_to_frame_output(
         frameDims.width,
         "x3, got ",
         int_array_ref_to_string(shape));
-    dst = pre_allocated_output_tensor.value();
+    dst = conversion_dst.value();
   } else {
     // Explicitly load the version defined in facebook::torchcodec::xpu
     // namespace as facebook::torchcodec defines the same but with the linkage
@@ -511,6 +542,15 @@ void XpuDeviceInterface::convert_av_frame_to_frame_output(
   std::chrono::duration<double, std::micro> duration = end - start;
   DEBUG_LOG(xpu::VERBOSE, "Conversion of frame height=" << frameDims.height << " width=" << frameDims.width
       << " took: " << duration.count() << "us" << std::endl);
+  }
+
+  if(rotation_ != Rotation::NONE){
+    frame_output.data = rotate_hwc_tensor(frame_output.data, rotation_);
+    if(pre_allocated_output_tensor.has_value()){
+      torch::stable::copy_(pre_allocated_output_tensor.value(), frame_output.data);
+      frame_output.data = pre_allocated_output_tensor.value();
+    }
+  }
 }
 
 void XpuDeviceInterface::convert_av_frame_to_frame_output_with_filter_graph(
@@ -1054,6 +1094,17 @@ UniqueAVFrame XpuDeviceInterface::convert_tensor_to_av_frame_for_encoding_with_c
   vaFrame->colorspace  = codec_context->colorspace;
   vaFrame->color_range = codec_context->color_range;
   return vaFrame;
+}
+
+OutputDtype XpuDeviceInterface::get_pre_allocation_dtype(
+  [[maybe_unused]] OutputDtype requested_dtype) const{
+    return OutputDtype::UINT8;
+  }
+std::string XpuDeviceInterface::get_details() {
+  if (!has_decode_frame_) {
+    return "Xpu Device Interface. Fallback status unknown (no frames decoded) ";
+  }
+  return std::string("Xpu Device Interface. Using ") + (using_cpu_fallback_ ? "CPU fallback. " : "VAAPI." );
 }
 
 } // namespace facebook::torchcodec

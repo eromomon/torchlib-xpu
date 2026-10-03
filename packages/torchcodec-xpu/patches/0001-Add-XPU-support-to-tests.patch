@@ -6,9 +6,11 @@ Subject: [PATCH] Add XPU support to tests
 Signed-off-by: Edgar Romo Montiel <edgar.romo.montiel@intel.com>
 ---
  test/conftest.py | 19 +++++++++++++++++--
+ test/test_decoders.py | 17 +++++++++++++++++-
  test/test_ops.py | 14 ++++++++++++++
  test/utils.py    | 17 +++++++++++++++++
- 3 files changed, 48 insertions(+), 2 deletions(-)
+ 4 files changed, 64 insertions(+), 3 deletions(-)
+
 
 diff --git a/test/conftest.py b/test/conftest.py
 --- a/test/conftest.py
@@ -134,6 +136,42 @@ index 5a72a804..ca8ee597 100644
          else:
              torch.testing.assert_close(*args, **kwargs, atol=0, rtol=0)
      else:
+
+diff --git a/test/test_decoders.py b/test/test_decoders.py
+--- a/test/test_decoders.py
++++ b/test/test_decoders.py
+@@ -2630,14 +2630,31 @@ class TestVideoDecoder:
+         assert decoder.cpu_fallback.status_known
+         _ = decoder[0]
+
+         assert not decoder.cpu_fallback
+         assert "No fallback required" in str(decoder.cpu_fallback)
+
++    @pytest.mark.needs_xpu
++    def test_xpu_cpu_fallback_status(self):
++        decoder = VideoDecoder(NASA_VIDEO.path, device="xpu")
++        assert not decoder.cpu_fallback.status_known
++
++        _ = decoder[0]
++        details = _core._get_backend_details(decoder._decoder)
++        assert details.startswith("XPU Device Interface.")
++        assert decoder.cpu_fallback.status_known
++        assert bool(decoder.cpu_fallback) == ("CPU fallback" in details)
++        if os.environ.get("FORCE_CPU_FALLBACK", "") in ("1", "true", "on"):
++            assert decoder.cpu_fallback
++
+     @pytest.mark.parametrize("dimension_order", ["NCHW", "NHWC"])
+     @pytest.mark.parametrize(
+         # We are skipping over cuda:ffmpeg because we do not support rotation
+         # metadata for the FFmpeg CUDA interface.
+         "device",
+-        ("cpu", pytest.param("cuda", marks=pytest.mark.needs_cuda)),
++        (
++            "cpu",
++            pytest.param("cuda", marks=pytest.mark.needs_cuda),
++            pytest.param("xpu", marks=pytest.mark.needs_xpu),
++        ),
+     )
+     def test_rotation_applied_to_frames(self, dimension_order, device):
 -- 
 2.48.1
-
