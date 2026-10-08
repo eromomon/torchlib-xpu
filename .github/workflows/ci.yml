@@ -247,12 +247,14 @@ jobs:
         - image: 'ubuntu:26.04'
           python-version: '3.14'
           runner: 'bmg'
+          ffmpeg-version: 'n8.0.1'
           cpu_fallback: true
           force_cpu_fallback: false
         # This verifies forced fallback scenario when decoding is entirely on CPU
         - image: 'ubuntu:26.04'
           python-version: '3.14'
           runner: 'bmg'
+          ffmpeg-version: 'n8.0.1'
           cpu_fallback: true
           force_cpu_fallback: true
     runs-on: ${{matrix.runner}}
