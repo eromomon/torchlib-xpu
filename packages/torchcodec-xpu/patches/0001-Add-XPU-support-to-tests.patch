@@ -5,10 +5,11 @@ Subject: [PATCH] Add XPU support to tests
 
 Signed-off-by: Edgar Romo Montiel <edgar.romo.montiel@intel.com>
 ---
- test/conftest.py | 19 +++++++++++++++++--
- test/test_ops.py | 14 ++++++++++++++
- test/utils.py    | 17 +++++++++++++++++
- 3 files changed, 48 insertions(+), 2 deletions(-)
+ test/conftest.py      | 15 +++++++++++++++
+ test/test_decoders.py | 28 ++++++++++++++++++++++------
+ test/test_ops.py      | 14 ++++++++++++++
+ test/utils.py         | 17 +++++++++++++++++
+ 4 files changed, 68 insertions(+), 6 deletions(-)
 
 diff --git a/test/conftest.py b/test/conftest.py
 --- a/test/conftest.py
@@ -92,6 +93,43 @@ index 09c9c491..ba33bd0b 100644
  
  class TestAudioDecoderOps:
      @pytest.mark.parametrize(
+diff --git a/test/test_decoders.py b/test/test_decoders.py
+--- a/test/test_decoders.py
++++ b/test/test_decoders.py
+@@ -2803,11 +2803,27 @@
+-    @needs_cuda
+-    @pytest.mark.parametrize("device", cuda_devices())
+-    def test_cpu_fallback_no_fallback_on_supported_video(self, device):
+-        """Test that supported videos don't trigger fallback on CUDA."""
++    @pytest.mark.parametrize(
++        "device",
++        (
++            *cuda_devices(),
++            pytest.param("xpu", marks=pytest.mark.needs_xpu),
++        ),
++    )
++    def test_cpu_fallback_status_on_supported_video(self, device):
++        """Check fallback status for supported video and forced fallback."""
+         decoder, _ = make_video_decoder(NASA_VIDEO.path, device=device)
+ 
++        if device == "xpu":
++            assert not decoder.cpu_fallback.status_known
++
+         decoder[0]
+ 
+-        assert not decoder.cpu_fallback
+-        assert "No fallback required" in str(decoder.cpu_fallback)
++        assert decoder.cpu_fallback.status_known
++        expected_fallback = (
++            device == "xpu"
++            and os.getenv("FORCE_CPU_FALLBACK", "false").lower()
++            in {"1", "true", "on"}
++        )
++        assert bool(decoder.cpu_fallback) == expected_fallback
++
++        if not expected_fallback:
++            assert "No fallback required" in str(decoder.cpu_fallback)
+
 diff --git a/test/utils.py b/test/utils.py
 index 5a72a804..ca8ee597 100644
 --- a/test/utils.py
