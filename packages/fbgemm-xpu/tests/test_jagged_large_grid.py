@@ -53,8 +53,8 @@ Reaching the limit at D = 16 now needs nnz ~ 268M, or ~16 GiB for ``x_values``
 alone; D = 1 reproduces the same 2**31 launch in ~4 GiB, so that is what the
 tests below use.
 
-Each test is skipped unless the device has enough free memory; the smallest shape
-that trips either limit needs multi-gigabyte operands.
+Each test is skipped unless the device has enough free memory; the smallest
+shape that trips either limit needs multi-gigabyte operands.
 """
 
 import fbgemm_xpu  # noqa: F401  - registers the fbgemm XPU operators
