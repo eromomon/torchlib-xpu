@@ -56,9 +56,9 @@ operators, registered under the `torch.ops.fbgemm` namespace.
   - Does not support pruning/index remapping, mixed dimensions, `torch.compile`,
     or FakeTensor execution.
 
-The following operators are also implemented but do not constitute
-public documented FBGEMM API. These are extra variants, helpers, or utility
-operators alongside the operators above. You can find their exact signature in
+The following operators are also implemented. Some are documented on FBGEMM's
+jagged tensor operators page; the rest are internal variants, helpers, and
+utility operators. You can find their exact signatures in
 [ops_registry.cpp](src/fbgemm_xpu/ops_registry.cpp):
 
 - `asynchronous_exclusive_cumsum`
@@ -80,6 +80,10 @@ operators alongside the operators above. You can find their exact signature in
 - `reorder_batched_ad_indices`
 - `reorder_batched_ad_lengths`
 - `all_to_one_device`
+- `jagged_dense_elementwise_add`
+- `jagged_dense_elementwise_mul`
+- `jagged_dense_elementwise_mul_forward`
+- `jagged_dense_elementwise_mul_backward`
 
 ## Supported hardware
 
