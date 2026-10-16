@@ -315,6 +315,26 @@ void XpuDeviceInterface::initialize_video_decoding(
   }
 }
 
+void XpuDeviceInterface::initialize_color_conversion(
+    const VideoStreamOptions& video_stream_options,
+    const std::vector<std::unique_ptr<Transform>>& transforms,
+    const std::optional<FrameDims>& resized_output_dims) {
+  TORCH_CHECK(
+    transforms.empty(),
+    "XPU color conversion does not support transforms");
+  TORCH_CHECK(
+    !resized_output_dims.has_value(),
+    "XPU color conversion does not support resized output dimensions");
+
+  video_stream_options_ = video_stream_options;
+
+  if (xpu::cpu_fallback()) {
+    ensure_cpu_interface();
+    cpu_interface_->initialize_color_conversion(
+      video_stream_options, transforms, resized_output_dims);
+  }
+}
+
 std::string XpuDeviceInterface::get_details() {
   if (!has_decoded_frame_) {
     return "XpuDeviceInterface: Fallback status unknown (No frames decoded).";
