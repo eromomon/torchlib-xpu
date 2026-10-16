@@ -6,10 +6,10 @@ Subject: [PATCH] Add XPU support to tests
 Signed-off-by: Edgar Romo Montiel <edgar.romo.montiel@intel.com>
 ---
  test/conftest.py      | 15 +++++++++++++++
- test/test_decoders.py | 28 ++++++++++++++++++++++------
+ test/test_decoders.py | 36 +++++++++++++++++++++++++++++-------
  test/test_ops.py      | 14 ++++++++++++++
  test/utils.py         | 17 +++++++++++++++++
- 4 files changed, 68 insertions(+), 6 deletions(-)
+ 4 files changed, 75 insertions(+), 7 deletions(-)
 
 diff --git a/test/conftest.py b/test/conftest.py
 --- a/test/conftest.py
@@ -129,6 +129,17 @@ diff --git a/test/test_decoders.py b/test/test_decoders.py
 +
 +        if not expected_fallback:
 +            assert "No fallback required" in str(decoder.cpu_fallback)
+ 
+@@ -3813,2 +3829,8 @@ class TestLowLevel:
+-    @pytest.mark.parametrize("device", _low_level_devices())
++    @pytest.mark.parametrize(
++        "device",
++        (
++            *_low_level_devices(),
++            pytest.param("xpu", marks=pytest.mark.needs_xpu),
++        ),
++    )
+     def test_block_output_types(self, device):
 
 diff --git a/test/utils.py b/test/utils.py
 index 5a72a804..ca8ee597 100644
