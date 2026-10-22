@@ -40,6 +40,10 @@ class XpuDeviceInterface : public DeviceInterface {
       std::optional<torch::stable::Tensor> pre_allocated_output_tensor =
           std::nullopt) override;
 
+  void make_frame_standalone(UniqueAVFrame& av_frame) override;
+  std::optional<torch::stable::Tensor> get_frame_storage(
+      const AVFrame& av_frame) const override;
+
   // ---- Encoding overrides ----
   UniqueAVFrame convert_tensor_to_av_frame_for_encoding(
       const torch::stable::Tensor& tensor,
