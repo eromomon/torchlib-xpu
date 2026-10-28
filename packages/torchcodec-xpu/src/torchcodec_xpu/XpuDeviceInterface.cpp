@@ -267,6 +267,8 @@ XpuDeviceInterface::XpuDeviceInterface(const StableDevice& device)
   torch::stable::Tensor dummyTensorForXpuInitialization = torch::stable::empty(
       {1}, kStableUInt8, std::nullopt, StableDevice(device));
   
+  // The base constructor preserves an unspecified index ("xpu"). Resolve it
+  // to the allocation's actual device for ColorConverter's device comparison.
   device_ = dummyTensorForXpuInitialization.device();
   auto arch = xpu::getArchitecture(device_);
   if (!xpu::force_cpu_fallback()) {
@@ -336,6 +338,9 @@ void XpuDeviceInterface::initialize_color_conversion(
     const VideoStreamOptions& video_stream_options,
     const std::vector<std::unique_ptr<Transform>>& transforms,
     const std::optional<FrameDims>& resized_output_dims) {
+  // A standalone ColorConverter owns a separate interface with no decoder
+  // initialization. Core calls this hook before dispatching frames through
+  // convert_av_frame_to_frame_output(), which selects SYCL, VAAPI, or CPU.
   TORCH_CHECK(
     transforms.empty(),
     "XPU color conversion does not support transforms");
@@ -345,6 +350,7 @@ void XpuDeviceInterface::initialize_color_conversion(
 
   video_stream_options_ = video_stream_options;
 
+  // Prepare fallback state; this does not select CPU conversion for a frame.
   if (xpu::cpu_fallback()) {
     ensure_cpu_interface();
     cpu_interface_->initialize_color_conversion(
@@ -377,6 +383,10 @@ VADisplay getVaDisplayFromAV(AVFrame* avFrame) {
 }
 
 void XpuDeviceInterface::make_frame_standalone(UniqueAVFrame& frame) {
+  // FFmpeg VAAPI frames retain their surfaces through buffer references, so
+  // standalone handoff does not require the mapped-surface copy used by NVDEC.
+  // get_frame_storage() retains an additional frame reference for its import.
+  // Software-frame upload is not implemented and is rejected below.
   TORCH_CHECK(frame != nullptr, "Decoded frame is null");
   TORCH_CHECK(frame->format == AV_PIX_FMT_VAAPI, 
     "Only VAAPI frames can be made standalone", 
@@ -385,11 +395,17 @@ void XpuDeviceInterface::make_frame_standalone(UniqueAVFrame& frame) {
 
 std::optional<torch::stable::Tensor> XpuDeviceInterface::get_frame_storage(
   const AVFrame& frame) const {
+    // Unlike the CUDA getter, this does not cast private data from opaque_ref
+    // or depend on a marker attached by make_frame_standalone(). It creates
+    // ownership directly from the reference-counted VAAPI frame instead.
     TORCH_CHECK(frame.format == AV_PIX_FMT_VAAPI && frame.hw_frames_ctx, 
       "Expected a VAAPI frame with a hardware frame context");
+
     auto owner = std::make_shared<StandaloneVaapiImport>();
     owner->frame.reset(av_frame_clone(&frame));
     TORCH_CHECK(owner->frame != nullptr, "Failed to clone VAAPI frame");
+
+    // Complete surface writes before exporting the allocation for XPU access.
     auto display = getVaDisplayFromAV(owner->frame.get());
     auto surface = static_cast<VASurfaceID>(reinterpret_cast<uintptr_t>(frame.data[3]));
     TORCH_CHECK(vaSyncSurface(display, surface) == VA_STATUS_SUCCESS, "Failed to sync VAAPI surface");
@@ -398,6 +414,7 @@ std::optional<torch::stable::Tensor> XpuDeviceInterface::get_frame_storage(
         &owner->descriptor) == VA_STATUS_SUCCESS, "Failed to export VAAPI surface");
     TORCH_CHECK(owner->descriptor.num_objects == 1, "Expected single DMA-BUF allocation");
     
+    // Use the Level Zero context and device of PyTorch's current XPU stream.
     sycl::queue queue = c10::xpu::getCurrentXPUStream(device_.index());
     ze_device_handle_t native_device{};
 
@@ -410,6 +427,7 @@ std::optional<torch::stable::Tensor> XpuDeviceInterface::get_frame_storage(
       })
       .wait();
 
+    // Import the existing allocation without copying its pixels.
     ze_external_memory_import_fd_t import{};
     import.stype = ZE_STRUCTURE_TYPE_EXTERNAL_MEMORY_IMPORT_FD;
     import.flags = ZE_EXTERNAL_MEMORY_TYPE_FLAG_DMA_BUF;
@@ -426,9 +444,14 @@ std::optional<torch::stable::Tensor> XpuDeviceInterface::get_frame_storage(
       native_device, &owner->pointer);
 
     TORCH_CHECK(result == ZE_RESULT_SUCCESS, "DMA-BUF import failed");
+
+  // The import no longer needs the exported FD; prevent a second close in
+  // StandaloneVaapiImport's destructor by invalidating the stored descriptor.
     close(fd);
     owner->descriptor.objects[0].fd = -1;
     
+  // Capturing owner keeps both the imported pointer and cloned frame alive
+  // until the tensor storage is released; its destructor performs cleanup.
     return torch::stable::from_blob(owner->pointer, {size}, {1}, 
       device_, kStableUInt8, [owner](void*) {});    
   }

@@ -134,7 +134,7 @@ diff --git a/test/test_decoders.py b/test/test_decoders.py
 +                        os.getenv("FORCE_CPU_FALLBACK", "false").lower()
 +                        in {"1", "true", "on"},
 +                        reason=(
-+                            "Issue 1: standalone software-frame upload to XPU "
++                            "Standalone software-frame upload to XPU "
 +                            "is not implemented yet"
 +                        ),
 +                    ),
