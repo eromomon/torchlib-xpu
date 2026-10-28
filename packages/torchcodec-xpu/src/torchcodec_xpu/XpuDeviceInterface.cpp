@@ -22,6 +22,7 @@
 
 extern "C" {
 #include <libavutil/hwcontext_vaapi.h>
+#include <libavutil/imgutils.h>
 #include <libavutil/pixdesc.h>
 #include <libswscale/swscale.h>
 }
@@ -225,6 +226,65 @@ UniqueAVFrame allocNV12Frame(
 
 } // namespace xpu
 
+char uploaded_frame_tag;
+struct SoftwareFrameStorage {
+  torch::stable::Tensor bytes;
+  void* original_opaque;
+};
+
+void release_software_storage(void* opaque, uint8_t*){
+  delete static_cast<SoftwareFrameStorage*>(opaque);
+}
+
+SoftwareFrameStorage* uploaded_storage(const AVFrame& frame){
+  if (frame.opaque != &uploaded_frame_tag) return nullptr;
+  TORCH_CHECK(frame.buf[0] != nullptr, "Uploaded frame has no storage");
+  return static_cast<SoftwareFrameStorage*>(av_buffer_get_opaque(frame.buf[0]));
+}
+
+torch::stable::Tensor copy_frame_bytes(const torch::stable::Tensor& source, const StableDevice& target){
+  auto result = torch::stable::to(source, target);
+  auto xpu_device = target.type() == kStableXPU ? target : source.device();
+  sycl::queue queue = c10::xpu::getCurrentXPUStream(xpu_device.index());
+  queue.wait_and_throw();
+  return result;
+}
+
+UniqueAVFrame wrap_software_storage(const AVFrame& source, torch::stable::Tensor bytes, void* frame_opaque, void* original_opaque){
+  UniqueAVFrame result(av_frame_alloc());
+  TORCH_CHECK(result != nullptr, "Failed to allocate AVFrame");
+  result->format = source.format; result->width = source.width; result->height = source.height;
+  TORCH_CHECK(av_frame_copy_props(result.get(), &source) == 0, "Failed to copy AVFrame properties");
+  auto owner = std::make_unique<SoftwareFrameStorage>(SoftwareFrameStorage{bytes, original_opaque});
+  auto* pointer = static_cast<uint8_t*>(bytes.data_ptr());
+  result->buf[0] = av_buffer_create(pointer, bytes.numel(), release_software_storage, owner.get(), 0);
+  TORCH_CHECK(result->buf[0] != nullptr, "Failed to create standalone software storage" );
+  owner.release();
+  int status = av_image_fill_arrays(result->data, result->linesize, pointer, static_cast<AVPixelFormat>(result->format), result->width, result->height, 1);
+  TORCH_CHECK(status >= 0 && status == bytes.numel(), "Invalid standalone software frame layout");
+  result->opaque = frame_opaque;
+  return result;
+}
+
+UniqueAVFrame upload_software_frame(const AVFrame& source, const StableDevice& device){
+  auto format = static_cast<AVPixelFormat>(source.format);
+  const auto* descriptor = av_pix_fmt_desc_get(format);
+  TORCH_CHECK(descriptor && !(descriptor->flags & (AV_PIX_FMT_FLAG_HWACCEL | AV_PIX_FMT_FLAG_PAL | AV_PIX_FMT_FLAG_BITSTREAM | AV_PIX_FMT_FLAG_FLOAT)),
+              "Software format fallback not supported");
+  for (int component = 0; component < descriptor->nb_components; ++component) 
+    TORCH_CHECK(descriptor->comp[component].depth == 8, "Low-level software format fallback only supports 8-bit components");
+  int size = av_image_get_buffer_size(format, source.width, source.height, 1);
+  TORCH_CHECK(size > 0, "Invalid software fallback frame dimensions of format");
+  auto staging = torch::stable::empty({size}, kStableUInt8, std::nullopt, StableDevice(kStableCPU));
+  int copied = av_image_copy_to_buffer(static_cast<uint8_t*>(staging.data_ptr()), size, source.data, source.linesize, format, source.width, source.height, 1);
+  TORCH_CHECK(copied == size, "Failed to copy software frame to staging buffer");
+  return wrap_software_storage(source, copy_frame_bytes(staging, device), &uploaded_frame_tag, source.opaque);
+} 
+
+UniqueAVFrame download_software_frame(const AVFrame& source, const SoftwareFrameStorage& storage){
+  return wrap_software_storage(source, copy_frame_bytes(storage.bytes, StableDevice(kStableCPU)), storage.original_opaque, storage.original_opaque);
+}
+
 struct StandaloneVaapiImport{
   UniqueAVFrame frame;
   VADRMPRIMESurfaceDescriptor descriptor{};
@@ -378,13 +438,22 @@ VADisplay getVaDisplayFromAV(AVFrame* avFrame) {
 
 void XpuDeviceInterface::make_frame_standalone(UniqueAVFrame& frame) {
   TORCH_CHECK(frame != nullptr, "Decoded frame is null");
-  TORCH_CHECK(frame->format == AV_PIX_FMT_VAAPI, 
-    "Only VAAPI frames can be made standalone", 
-    "software-frame upload is not implemented");
+  if (uploaded_storage(*frame) != nullptr) {
+    return;
+  }
+  if (frame->format == AV_PIX_FMT_VAAPI){
+    TORCH_CHECK(frame->hw_frames_ctx != nullptr, "VAAPI frame has no hardware frame context");
+    const auto* context = reinterpret_cast<AVHWFramesContext*>(frame->hw_frames_ctx->data);
+    TORCH_CHECK(context->sw_format == AV_PIX_FMT_NV12, "Expected NV12 software format for VAAPI frame");
+    return;
+  }
+  TORCH_CHECK(xpu::cpu_fallback(), "CPU fallback not allowed for software-decoded frames");
+  frame = upload_software_frame(*frame, device_);
 }
 
 std::optional<torch::stable::Tensor> XpuDeviceInterface::get_frame_storage(
   const AVFrame& frame) const {
+    if (auto* storage = uploaded_storage(frame)) return storage->bytes;
     TORCH_CHECK(frame.format == AV_PIX_FMT_VAAPI && frame.hw_frames_ctx, 
       "Expected a VAAPI frame with a hardware frame context");
     auto owner = std::make_shared<StandaloneVaapiImport>();
@@ -565,7 +634,16 @@ void XpuDeviceInterface::convert_av_frame_to_frame_output(
     ensure_cpu_interface();
 
     FrameOutput cpuFrameOutput;
-    cpu_interface_->convert_av_frame_to_frame_output(av_frame, cpuFrameOutput);
+    // cpu_interface_->convert_av_frame_to_frame_output(av_frame, cpuFrameOutput);
+
+    UniqueAVFrame downloaded;
+    const AVFrame* input = &av_frame;
+    if (auto* storage = uploaded_storage(av_frame)) {
+      downloaded = download_software_frame(av_frame, *storage);
+      input = downloaded.get();
+    }
+    cpu_interface_->convert_av_frame_to_frame_output(*input, cpuFrameOutput);
+
 
     // Finally, we need to send the frame back to the GPU. Note that the
     // pre-allocated tensor is on the GPU, so we can't send that to the CPU

@@ -120,7 +120,7 @@ diff --git a/test/test_decoders.py b/test/test_decoders.py
 +
      @needs_cuda
      def test_beta_backend_still_supported_for_bc(self):
-@@ -3813,2 +3829,21 @@ class TestLowLevel:
+@@ -3813,2 +3829,11 @@ class TestLowLevel:
 -    @pytest.mark.parametrize("device", _low_level_devices())
 +    @pytest.mark.parametrize(
 +        "device",
@@ -128,17 +128,7 @@ diff --git a/test/test_decoders.py b/test/test_decoders.py
 +            *_low_level_devices(),
 +            pytest.param(
 +                "xpu",
-+                marks=[
-+                    pytest.mark.needs_xpu,
-+                    pytest.mark.skipif(
-+                        os.getenv("FORCE_CPU_FALLBACK", "false").lower()
-+                        in {"1", "true", "on"},
-+                        reason=(
-+                            "Issue 1: standalone software-frame upload to XPU "
-+                            "is not implemented yet"
-+                        ),
-+                    ),
-+                ],
++                marks=pytest.mark.needs_xpu
 +            ),
 +        ),
 +    )
