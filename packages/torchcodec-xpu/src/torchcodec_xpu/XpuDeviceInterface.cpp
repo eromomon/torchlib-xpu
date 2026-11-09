@@ -245,6 +245,42 @@ UniqueAVFrame allocNV12Frame(
 
 } // namespace xpu
 
+namespace{
+  class ScopedZeAllocation {
+    public:
+    ScopedZeAllocation(ze_context_handle_t context, sycl::queue& queue, void* ptr) 
+        : context_(context), queue_(queue), ptr_(ptr){}
+
+    ~ScopedZeAllocation() {
+      if (!ptr_) {
+        return;
+      }
+      try {
+        queue_.wait();
+      } catch (...) {}
+      ze_result_t result = zeMemFree(context_, ptr_);
+      if (result != ZE_RESULT_SUCCESS) {
+        DEBUG_LOG(
+          xpu::ERROR, "zeMemFree failed: " << static_cast<uint32_t>(result));
+      }
+    }
+
+    ScopedZeAllocation(const ScopedZeAllocation&) = delete;
+    ScopedZeAllocation& operator=(const ScopedZeAllocation&) = delete;
+
+    void release(){
+      ptr_ = nullptr;
+    }
+
+    private:
+      ze_context_handle_t context_;
+      sycl::queue& queue_;
+      void* ptr_;
+  };
+
+}
+
+
 int get_device_index(const StableDevice& device) {
   // PyTorch uses int8_t as its torch::DeviceIndex, but FFmpeg and XPU
   // libraries use int. So we use int, too.
@@ -566,16 +602,19 @@ void XpuDeviceInterface::convert_av_frame_to_frame_output_with_filter_graph(
     desc.objects[0].size, 0, static_cast<ze_device_handle_t>(ze_dev), &usm_ptr);
   TORCH_CHECK(res == ZE_RESULT_SUCCESS, "zeMemAllocDevice failed: ", dma_buf_fd.get(), 
       ", ze_result=", static_cast<uint32_t>(res));
+
+  ScopedZeAllocation imported_mem(static_cast<ze_context_handle_t>(ze_ctx_), queue, usm_ptr);
   dma_buf_fd.release();
 
-  try{
-    it = imported_surfaces_.emplace(surface_id, ImportedSurface{
-      usm_ptr, static_cast<uint32_t>(offset), static_cast<uint32_t>(pitch)}).first;
-    } catch (...) {
-      zeMemFree(static_cast<ze_context_handle_t>(ze_ctx_), usm_ptr);
-      throw;
-    }
-  DEBUG_LOG(xpu::VERBOSE, "Imported VA surface " << surface_id << "cached= " << imported_surfaces_.size());
+  auto [entry, inserted] = imported_surfaces_.emplace(
+    surface_id, ImportedSurface{
+      usm_ptr, static_cast<uint32_t>(offset), static_cast<uint32_t>(pitch)
+    });
+
+  it = entry;
+  if (inserted) {
+    imported_mem.release();
+  }
   }
 
   struct QueueWaitGuard {
@@ -637,7 +676,7 @@ bool XpuDeviceInterface::convert_av_frame_to_frame_output_with_sycl(
   }
   TORCH_CHECK(desc.num_objects == 1, "Expected 1 DMA-BUF object");
   TORCH_CHECK(desc.num_layers == 2 && desc.layers[0].num_planes == 1 &&
-      desc.layers[1].num_planes == 1, "Unsupported NV12 layout for Sycl decodeing")
+      desc.layers[1].num_planes == 1, "Unsupported NV12 layout for Sycl decoding");
   std::unique_ptr<xpuManagerCtx> context = std::make_unique<xpuManagerCtx>();
   ze_device_handle_t ze_device{};
   sycl::queue queue = c10::xpu::getCurrentXPUStream(device_.index());
@@ -675,6 +714,8 @@ bool XpuDeviceInterface::convert_av_frame_to_frame_output_with_sycl(
       ", context=", static_cast<void*>(context->zeCtx), 
       ", device=", static_cast<void*>(ze_device));
 
+  ScopedZeAllocation imported_mem(context->zeCtx, queue, usm_ptr);
+
   dma_buf_fd.release();
 
   convertNV12ToRGB(
@@ -688,7 +729,6 @@ bool XpuDeviceInterface::convert_av_frame_to_frame_output_with_sycl(
       frame.color_range,
       frame.colorspace);
 
-  zeMemFree(context->zeCtx, usm_ptr);
   converted = true;
 #endif
   return converted;
@@ -968,6 +1008,8 @@ UniqueAVFrame XpuDeviceInterface::convert_tensor_to_av_frame_for_encoding_with_s
 
   TORCH_CHECK(res == ZE_RESULT_SUCCESS, "zeMemAllocDevice failed importing encode surface fd=", dma_buf_fd.get(), ", ze_result=", static_cast<uint32_t>(res));
 
+  ScopedZeAllocation imported_mem(zeCtx, queue, usm_ptr);
+
   dma_buf_fd.release();
 
   // Extract Y and UV plane pointers and pitches for both layouts
@@ -988,6 +1030,7 @@ UniqueAVFrame XpuDeviceInterface::convert_tensor_to_av_frame_for_encoding_with_s
 
   // drm_format_modifier != 0 means tiled (e.g. Intel Tile-Y on BMG/Gen12+).
   const bool is_tiled = (desc.objects[0].drm_format_modifier != 0);
+
   convertRGBToNV12(
       queue,
       static_cast<const uint8_t*>(tensor.data_ptr()),
@@ -1003,8 +1046,6 @@ UniqueAVFrame XpuDeviceInterface::convert_tensor_to_av_frame_for_encoding_with_s
       is_tiled,
       codec_context->color_range,
       codec_context->colorspace);
-
-  zeMemFree(zeCtx, usm_ptr);
 
   vaFrame->colorspace  = codec_context->colorspace;
   vaFrame->color_range = codec_context->color_range;
