@@ -11,9 +11,8 @@
 #include <level_zero/ze_api.h>
 #include <va/va_drmcommon.h>
 
-#include <ATen/Functions.h>
+#include <ATen/DLConvertor.h>
 #include <c10/xpu/XPUStream.h>
-#include <sycl/ext/oneapi/backend/level_zero.hpp>
 
 #include "ColorConversionKernel.h"
 #include "Cache.h"
@@ -27,26 +26,6 @@ extern "C" {
 }
 
 namespace facebook::torchcodec {
-
-namespace {
-  class ScopedFd {
-  public:
-    explicit ScopedFd(int fd) : fd_(fd) {}
-    ~ScopedFd() {
-      if (fd_ >= 0) {
-        close(fd_);
-      }
-    }
-    ScopedFd(const ScopedFd&) = delete;
-    ScopedFd& operator=(const ScopedFd&) = delete;
-    int get() const { return fd_; }
-    void release() {
-      fd_ = -1;
-    }
-  private:
-    int fd_;
-  };
-} // namespace
 
 namespace xpu {
 
@@ -245,42 +224,6 @@ UniqueAVFrame allocNV12Frame(
 
 } // namespace xpu
 
-namespace{
-  class ScopedZeAllocation {
-    public:
-    ScopedZeAllocation(ze_context_handle_t context, sycl::queue& queue, void* ptr) 
-        : context_(context), queue_(queue), ptr_(ptr){}
-
-    ~ScopedZeAllocation() {
-      if (!ptr_) {
-        return;
-      }
-      try {
-        queue_.wait();
-      } catch (...) {}
-      ze_result_t result = zeMemFree(context_, ptr_);
-      if (result != ZE_RESULT_SUCCESS) {
-        DEBUG_LOG(
-          xpu::ERROR, "zeMemFree failed: " << static_cast<uint32_t>(result));
-      }
-    }
-
-    ScopedZeAllocation(const ScopedZeAllocation&) = delete;
-    ScopedZeAllocation& operator=(const ScopedZeAllocation&) = delete;
-
-    void release(){
-      ptr_ = nullptr;
-    }
-
-    private:
-      ze_context_handle_t context_;
-      sycl::queue& queue_;
-      void* ptr_;
-  };
-
-}
-
-
 int get_device_index(const StableDevice& device) {
   // PyTorch uses int8_t as its torch::DeviceIndex, but FFmpeg and XPU
   // libraries use int. So we use int, too.
@@ -330,29 +273,7 @@ XpuDeviceInterface::XpuDeviceInterface(const StableDevice& device)
   DEBUG_LOG(xpu::INFO, "Device supports FP64: " << has_fp64_);
 }
 
-void XpuDeviceInterface::release_imported_surface() {
-  if (imported_surfaces_.empty()){
-    return;
-  }
-  try{
-    sycl::queue queue = c10::xpu::getCurrentXPUStream(device_.index());
-    queue.wait();
-  } catch (...) {
-    DEBUG_LOG(xpu::ERROR, "Failed to wait for XPU queue before releasing imported surfaces");
-  }
-  for (auto& [surface_id, imported] : imported_surfaces_) {
-    ze_result_t res = zeMemFree(static_cast<ze_context_handle_t>(ze_ctx_), imported.ptr);
-    if (res != ZE_RESULT_SUCCESS) {
-      DEBUG_LOG(xpu::INFO, "zeMemFree failed for imported surface with ID " << surface_id
-      << ", ze_result_t: " << static_cast<int>(res));
-    }
-  }
-  imported_surfaces_.clear();
-}
-
 XpuDeviceInterface::~XpuDeviceInterface() {
-  release_imported_surface();
-  filter_graph_.reset();
   if (ctx_) {
     xpu::g_cached_hw_device_ctxs.add_if_cache_has_capacity(device_, std::move(ctx_));
   }
@@ -418,9 +339,201 @@ VADisplay getVaDisplayFromAV(AVFrame* avFrame) {
   return vactx->display;
 }
 
+namespace {
+  class ScopedFd{
+    public:
+    explicit ScopedFd(int fd) : fd_(fd) {}
+    ~ScopedFd() {
+      if (fd_ >= 0) {
+        close(fd_);
+      }
+    }
+  
+
+    ScopedFd(const ScopedFd&) = delete;
+    ScopedFd& operator=(const ScopedFd&) = delete;
+    
+    int get() const { return fd_; }
+    void release() { fd_ = -1; }
+
+    private:
+      int fd_;
+  };
+
+  class ScopedZeAllocation {
+    public:
+      ScopedZeAllocation(
+        ze_context_handle_t context,
+        sycl::queue& queue,
+        void* ptr)
+        : context_(context), queue_(queue), ptr_(ptr) {}
+      
+      ~ScopedZeAllocation() {
+        if (!ptr_) {
+          return;
+        }
+        try {
+          queue_.wait();
+        } catch (...){
+
+        }
+        ze_result_t result = zeMemFree(context_, ptr_);
+        if (result != ZE_RESULT_SUCCESS) {
+          DEBUG_LOG(xpu::ERROR, "zeMemFree failed: " << static_cast<uint32_t>(result));
+        }
+      }
+
+      ScopedZeAllocation(const ScopedZeAllocation&) = delete;
+      ScopedZeAllocation& operator=(const ScopedZeAllocation&) = delete;
+
+      void release() { ptr_ = nullptr;}
+
+    private:
+      ze_context_handle_t context_;
+      sycl::queue& queue_;
+      void* ptr_;
+  };
+
+}
+
+
 struct xpuManagerCtx {
+  UniqueAVFrame avFrame;
   ze_context_handle_t zeCtx = nullptr;
 };
+
+void deleter(DLManagedTensor* self) {
+  std::unique_ptr<DLManagedTensor> tensor(self);
+  std::unique_ptr<xpuManagerCtx> context((xpuManagerCtx*)self->manager_ctx);
+  zeMemFree(context->zeCtx, self->dl_tensor.data);
+  free(self->dl_tensor.shape);
+  free(self->dl_tensor.strides);
+}
+
+torch::stable::Tensor AVFrameToTensor(
+    const StableDevice& device,
+    const UniqueAVFrame& frame) {
+  TORCH_CHECK_EQ(frame->format, AV_PIX_FMT_VAAPI);
+
+  VADisplay display = getVaDisplayFromAV(frame.get());
+  auto surface_id = static_cast<VASurfaceID>(
+    reinterpret_cast<uintptr_t>(frame->data[3]));
+  VAStatus sts = vaSyncSurface(display, surface_id);
+  TORCH_CHECK( sts == VA_STATUS_SUCCESS, 
+      "vaSyncSurface failed: ", vaErrorStr(sts));
+
+  VADRMPRIMESurfaceDescriptor desc{};
+
+  sts = vaExportSurfaceHandle(
+      display,
+      surface_id,
+      VA_SURFACE_ATTRIB_MEM_TYPE_DRM_PRIME_2,
+      VA_EXPORT_SURFACE_READ_ONLY | VA_EXPORT_SURFACE_SEPARATE_LAYERS,
+      &desc);
+  TORCH_CHECK(
+      sts == VA_STATUS_SUCCESS,
+      "vaExportSurfaceHandle failed: ",
+      vaErrorStr(sts));
+
+  TORCH_CHECK(desc.num_objects > 0, "No DMA-BUF objects exported");
+  ScopedFd dma_buf_fd(desc.objects[0].fd);
+  for(uint32_t index = 1; index < desc.num_objects; ++index) {
+    close(desc.objects[index].fd);
+  }
+  TORCH_CHECK(desc.num_objects == 1, "Expected 1 fd, got ", desc.num_objects);
+  TORCH_CHECK(desc.num_layers == 1, "Expected 1 layer, got ", desc.num_layers);
+  TORCH_CHECK(
+      desc.layers[0].num_planes == 1,
+      "Expected 1 plane, got ",
+      desc.layers[0].num_planes);
+
+  const uint64_t pitch = desc.layers[0].pitch[0];
+  const uint64_t offset = desc.layers[0].offset[0];
+  TORCH_CHECK(frame->width > 0 && frame->height > 0, "Invalid frame dimensions");
+  TORCH_CHECK( pitch >= static_cast<uint64_t>(frame->width) * 4, "Invalid RGBA pitch");
+  TORCH_CHECK( offset + pitch * (frame->height - 1) + frame->width * 4 <= desc.objects[0].size,
+      "RGBA surface exceeds exported buffer size");
+
+  std::unique_ptr<xpuManagerCtx> context = std::make_unique<xpuManagerCtx>();
+  ze_device_handle_t ze_device{};
+  sycl::queue queue = c10::xpu::getCurrentXPUStream(device.index());
+
+  queue
+      .submit([&](sycl::handler& cgh) {
+        cgh.host_task([&](const sycl::interop_handle& ih) {
+          context->zeCtx =
+              ih.get_native_context<sycl::backend::ext_oneapi_level_zero>();
+          ze_device =
+              ih.get_native_device<sycl::backend::ext_oneapi_level_zero>();
+        });
+      })
+      .wait();
+
+  ze_external_memory_import_fd_t import_fd_desc{};
+  import_fd_desc.stype = ZE_STRUCTURE_TYPE_EXTERNAL_MEMORY_IMPORT_FD;
+  import_fd_desc.flags = ZE_EXTERNAL_MEMORY_TYPE_FLAG_DMA_BUF;
+  import_fd_desc.fd = dma_buf_fd.get();
+
+  ze_device_mem_alloc_desc_t alloc_desc{};
+  alloc_desc.stype = ZE_STRUCTURE_TYPE_DEVICE_MEM_ALLOC_DESC;
+  alloc_desc.pNext = &import_fd_desc;
+  void* usm_ptr = nullptr;
+
+  ze_result_t res = zeMemAllocDevice(
+      context->zeCtx, &alloc_desc, desc.objects[0].size, 0, ze_device, &usm_ptr);
+  TORCH_CHECK(
+      res == ZE_RESULT_SUCCESS, "Failed to import fd=", dma_buf_fd.get(),
+      ", ze_result = " , static_cast<uint32_t>(res));
+
+  ScopedZeAllocation imported_mem(context->zeCtx, queue, usm_ptr);
+  dma_buf_fd.release();
+
+  std::unique_ptr<DLManagedTensor> dl_dst = std::make_unique<DLManagedTensor>();
+  int64_t* shape = (int64_t*)malloc(3*sizeof(int64_t));
+
+  shape[0] = frame->height;
+  shape[1] = frame->width;
+  shape[2] = 4;
+
+  std::unique_ptr<int64_t, decltype(&std::free)> stride_owner(
+      static_cast<int64_t*>(std::malloc(3 * sizeof(int64_t))), &std::free);
+  TORCH_CHECK(stride_owner != nullptr, "Failed to allocate tensor strides");
+  stride_owner.get()[0] = static_cast<int64_t>(pitch);
+  stride_owner.get()[1] = 4;
+  stride_owner.get()[2] = 1;
+
+  context->avFrame.reset(av_frame_alloc());
+  TORCH_CHECK(context->avFrame.get(), "Failed to allocate AVFrame");
+
+  int status = av_frame_ref(context->avFrame.get(), frame.get());
+  TORCH_CHECK(
+      status >= 0,
+      "Failed to reference AVFrame: ",
+      get_ffmpeg_error_string_from_error_code(status));
+
+  dl_dst->manager_ctx = context.release();
+  dl_dst->deleter = deleter;
+  dl_dst->dl_tensor.data = usm_ptr;
+  imported_mem.release();
+  dl_dst->dl_tensor.device.device_type = kDLOneAPI;
+  dl_dst->dl_tensor.device.device_id = device.index();
+  dl_dst->dl_tensor.ndim = 3;
+  dl_dst->dl_tensor.dtype.code = kDLUInt;
+  dl_dst->dl_tensor.dtype.bits = 8;
+  dl_dst->dl_tensor.dtype.lanes = 1;
+  dl_dst->dl_tensor.shape = shape;
+  dl_dst->dl_tensor.strides = stride_owner.release();
+  dl_dst->dl_tensor.byte_offset = desc.layers[0].offset[0];
+
+  // torch::stable::Tensor(AtenTensorHandle) constructor steals the ownership, so
+  // we need to release at::Tensor after getting its handle.
+  auto dst = std::make_unique<at::Tensor>(at::fromDLPack(dl_dst.release()));
+  // From: https://github.com/pytorch/pytorch/blob/v2.11.0/torch/csrc/inductor/aoti_torch/utils.h#L32
+  // NOTE: this conversion migth get broken in the new PyTorch release which will
+  // likely result in the segmentation fault. If this will happen - update the conversion.
+  AtenTensorHandle dst_handle = reinterpret_cast<AtenTensorHandle>(dst.release());
+  return torch::stable::Tensor(dst_handle);
+}
 
 VADisplay getVaDisplayFromAV(UniqueAVFrame& avFrame) {
   AVHWFramesContext* hwfc = (AVHWFramesContext*)avFrame->hw_frames_ctx->data;
@@ -536,7 +649,6 @@ void XpuDeviceInterface::convert_av_frame_to_frame_output_with_filter_graph(
   filtersConfig.filtergraph_str = filters.str();
 
   if (!filter_graph_ || prev_filters_config_ != filtersConfig) {
-    release_imported_surface();
     filter_graph_ =
         std::make_unique<FilterGraph>(filtersConfig, video_stream_options_);
     prev_filters_config_ = std::move(filtersConfig);
@@ -548,95 +660,22 @@ void XpuDeviceInterface::convert_av_frame_to_frame_output_with_filter_graph(
 
   TORCH_CHECK_EQ(filteredAVFrame->format, AV_PIX_FMT_VAAPI);
 
-  VADisplay display = getVaDisplayFromAV(filteredAVFrame.get());
-  VASurfaceID surface_id = static_cast<VASurfaceID>(reinterpret_cast<uintptr_t>(filteredAVFrame->data[3]));
-  VAStatus sts = vaSyncSurface(display, surface_id);
-  TORCH_CHECK(
-      sts == VA_STATUS_SUCCESS,
-      "vaSyncSurface failed: ",
-      vaErrorStr(sts));
-
   sycl::queue queue = c10::xpu::getCurrentXPUStream(device_.index());
-  if (!ze_ctx_) {
-    ze_ctx_ = sycl::get_native<sycl::backend::ext_oneapi_level_zero>(queue.get_context());
-    ze_dev = sycl::get_native<sycl::backend::ext_oneapi_level_zero>(queue.get_device());
-  }
 
-  const int64_t height = filteredAVFrame->height;
-  const int64_t width = filteredAVFrame->width;
-
-  auto it = imported_surfaces_.find(surface_id);
-  if (it == imported_surfaces_.end()) {
-    VADRMPRIMESurfaceDescriptor desc{};
-    sts = vaExportSurfaceHandle(
-      display, surface_id, VA_SURFACE_ATTRIB_MEM_TYPE_DRM_PRIME_2,
-      VA_EXPORT_SURFACE_READ_ONLY | VA_EXPORT_SURFACE_COMPOSED_LAYERS,
-      &desc);
-  TORCH_CHECK(sts == VA_STATUS_SUCCESS, "vaExportSurfaceHandle failed: ", vaErrorStr(sts));
-  TORCH_CHECK(desc.num_objects > 0, "No DMA_BUF objects exported");
-  ScopedFd dma_buf_fd(desc.objects[0].fd);
-  for (uint32_t i = 1; i < desc.num_objects; ++i) {
-    close(desc.objects[i].fd);
-  }
-  TORCH_CHECK(desc.num_objects == 1, "Expected 1 fd, got ", desc.num_objects);
-  TORCH_CHECK(desc.num_layers == 1 && desc.layers[0].num_planes ==1, "Expected 1 layer with 1 plane");
-
-  const uint64_t offset = desc.layers[0].offset[0];
-  const uint64_t pitch = desc.layers[0].pitch[0];
-  TORCH_CHECK(pitch >= static_cast<uint64_t>(width) * 4, "Invalid pitch: ", pitch);
-  TORCH_CHECK(offset + pitch * (height - 1) + width * 4 <= desc.objects[0].size, 
-      "RGBA surface exceeded buffer size", desc.objects[0].size);
-
-  ze_external_memory_import_fd_t import_fd_desc{};
-  import_fd_desc.stype = ZE_STRUCTURE_TYPE_EXTERNAL_MEMORY_IMPORT_FD;
-  import_fd_desc.flags = ZE_EXTERNAL_MEMORY_TYPE_FLAG_DMA_BUF;
-  import_fd_desc.fd = dma_buf_fd.get();
-
-  ze_device_mem_alloc_desc_t alloc_desc{};
-  alloc_desc.stype = ZE_STRUCTURE_TYPE_DEVICE_MEM_ALLOC_DESC;
-  alloc_desc.pNext = &import_fd_desc;
-
-  void* usm_ptr = nullptr;
-  ze_result_t res = zeMemAllocDevice(
-    static_cast<ze_context_handle_t>(ze_ctx_), &alloc_desc,
-    desc.objects[0].size, 0, static_cast<ze_device_handle_t>(ze_dev), &usm_ptr);
-  TORCH_CHECK(res == ZE_RESULT_SUCCESS, "zeMemAllocDevice failed: ", dma_buf_fd.get(), 
-      ", ze_result=", static_cast<uint32_t>(res));
-
-  ScopedZeAllocation imported_mem(static_cast<ze_context_handle_t>(ze_ctx_), queue, usm_ptr);
-  dma_buf_fd.release();
-
-  auto [entry, inserted] = imported_surfaces_.emplace(
-    surface_id, ImportedSurface{
-      usm_ptr, static_cast<uint32_t>(offset), static_cast<uint32_t>(pitch)
-    });
-
-  it = entry;
-  if (inserted) {
-    imported_mem.release();
-  }
-  }
+  torch::stable::Tensor dst_rgb4 = AVFrameToTensor(device_, filteredAVFrame);
 
   struct QueueWaitGuard {
-    sycl::queue& q;
-    ~QueueWaitGuard(){
-      try{ q.wait(); } catch (...) {}
+    sycl::queue& queue;
+    ~QueueWaitGuard() {
+      try {
+        queue.wait();
+      } catch(...) {
+      }
     }
   } wait_guard{queue};
 
-  const ImportedSurface& imported = it->second;
-  const auto xpu_index = static_cast<c10::DeviceIndex>(get_device_index(device_));
-  auto src = std::make_unique<at::Tensor>(
-    at::for_blob(static_cast<uint8_t*>(imported.ptr) + imported.offset, {height, width, 3})
-        .strides({static_cast<int64_t>(imported.pitch), 4, 1})
-        .target_device(at::Device(at::kXPU, xpu_index))
-        .options(at::TensorOptions().dtype(at::kByte).device(at::kXPU, xpu_index))
-        .make_tensor());
-  torch::stable::Tensor src_rgb(reinterpret_cast<AtenTensorHandle>(src.release()));
-
-  torch::stable::copy_(dst, src_rgb);
+  torch::stable::copy_(dst, torch::stable::narrow(dst_rgb4, 2, 0, 3));
   queue.wait_and_throw();
-
 }
 
 bool XpuDeviceInterface::convert_av_frame_to_frame_output_with_sycl(
@@ -653,30 +692,24 @@ bool XpuDeviceInterface::convert_av_frame_to_frame_output_with_sycl(
 #ifdef WITH_SYCL_KERNELS
   DEBUG_LOG(xpu::VERBOSE, "Using SYCL kernel backend for conversion");
   TORCH_CHECK_EQ(frame.format, AV_PIX_FMT_VAAPI);
-  VADisplay display = getVaDisplayFromAV(const_cast<AVFrame*>(&frame));
-  VASurfaceID surface_id = (VASurfaceID)(uintptr_t)frame.data[3];
-  VAStatus sts = vaSyncSurface(display, surface_id);
-  TORCH_CHECK(
-      sts == VA_STATUS_SUCCESS,
-      "vaSyncSurface failed: ",
-      vaErrorStr(sts));
   VADRMPRIMESurfaceDescriptor desc{};
-  sts = vaExportSurfaceHandle(display,
-      surface_id,
+  VAStatus sts = vaExportSurfaceHandle(
+      getVaDisplayFromAV(const_cast<AVFrame*>(&frame)),
+      (VASurfaceID)(uintptr_t)frame.data[3],
       VA_SURFACE_ATTRIB_MEM_TYPE_DRM_PRIME_2,
       VA_EXPORT_SURFACE_READ_ONLY,
       &desc);
-  TORCH_CHECK(sts == VA_STATUS_SUCCESS, "vaExportSurfaceHandle failed: ", vaErrorStr(sts));
-  
+  TORCH_CHECK(
+      sts == VA_STATUS_SUCCESS,
+      "vaExportSurfaceHandle failed: ",
+      vaErrorStr(sts));
 
   TORCH_CHECK(desc.num_objects > 0, "No DMA-BUF objects exported");
   ScopedFd dma_buf_fd(desc.objects[0].fd);
-  for (uint32_t object_index = 1; object_index < desc.num_objects; ++object_index) {
-    close(desc.objects[object_index].fd);
-  }
-  TORCH_CHECK(desc.num_objects == 1, "Expected 1 DMA-BUF object");
-  TORCH_CHECK(desc.num_layers == 2 && desc.layers[0].num_planes == 1 &&
-      desc.layers[1].num_planes == 1, "Unsupported NV12 layout for Sycl decoding");
+  for(uint32_t index = 1; index < desc.num_objects; ++index) {
+    close(desc.objects[index].fd);
+  }    
+  TORCH_CHECK(desc.num_objects == 1, "Expected 1 DMA-BUF object, got ", desc.num_objects);
   std::unique_ptr<xpuManagerCtx> context = std::make_unique<xpuManagerCtx>();
   ze_device_handle_t ze_device{};
   sycl::queue queue = c10::xpu::getCurrentXPUStream(device_.index());
@@ -709,13 +742,10 @@ bool XpuDeviceInterface::convert_av_frame_to_frame_output_with_sycl(
       ze_device,
       &usm_ptr);
   TORCH_CHECK(
-      res == ZE_RESULT_SUCCESS, "SYCL DMA-BUF import failed: fd=", dma_buf_fd.get(), 
-      ", size=", desc.objects[0].size, ", ze_result=", static_cast<uint32_t>(res), 
-      ", context=", static_cast<void*>(context->zeCtx), 
-      ", device=", static_cast<void*>(ze_device));
+      res == ZE_RESULT_SUCCESS, "SYCL DMA-BUF import failed: fd= ", dma_buf_fd.get(),
+      ", ze_result= ", static_cast<uint32_t>(res));
 
   ScopedZeAllocation imported_mem(context->zeCtx, queue, usm_ptr);
-
   dma_buf_fd.release();
 
   convertNV12ToRGB(
@@ -962,14 +992,15 @@ UniqueAVFrame XpuDeviceInterface::convert_tensor_to_av_frame_for_encoding_with_s
       sts == VA_STATUS_SUCCESS,
       "vaExportSurfaceHandle (WRITE_ONLY) failed: ",
       vaErrorStr(sts));
-  TORCH_CHECK(desc.num_objects > 0, "Expected at least 1 DMA-BUF object ");
+  TORCH_CHECK(desc.num_objects > 0, "No DMA-BUF objects exported ");
   ScopedFd dma_buf_fd(desc.objects[0].fd);
-  if (desc.num_objects != 1){
-    for(uint32_t i = 1; i < desc.num_objects; ++i) {
-      close(desc.objects[i].fd);
-    }
-    TORCH_CHECK(false, "Expected exactly 1 DMA-BUF object, got ", desc.num_objects);
+
+  for(uint32_t index = 1; index < desc.num_objects; ++index) {
+    close(desc.objects[index].fd);
   }
+
+  TORCH_CHECK(desc.num_objects == 1, "Expected 1 DMA-BUF object, got ", desc.num_objects);
+
   // NV12 export layouts seen on Intel iHD/i915:
   //   A: 1 layer × 2 planes (Y, UV).   B: 2 layers × 1 plane (Y; UV) — used by BMG.
   // Both describe the same DMA-BUF; only the plane offsets/pitches differ.
@@ -1006,10 +1037,11 @@ UniqueAVFrame XpuDeviceInterface::convert_tensor_to_av_frame_for_encoding_with_s
   ze_result_t res = zeMemAllocDevice(
       zeCtx, &alloc_desc, desc.objects[0].size, 0, zeDevice, &usm_ptr);
 
-  TORCH_CHECK(res == ZE_RESULT_SUCCESS, "zeMemAllocDevice failed importing encode surface fd=", dma_buf_fd.get(), ", ze_result=", static_cast<uint32_t>(res));
-
+  TORCH_CHECK(
+    res == ZE_RESULT_SUCCESS, "zeMemAllocDevice failed importing encode surface fd=", 
+    dma_buf_fd.get(), ", ze_result=", static_cast<uint32_t>(res));
+  
   ScopedZeAllocation imported_mem(zeCtx, queue, usm_ptr);
-
   dma_buf_fd.release();
 
   // Extract Y and UV plane pointers and pitches for both layouts
@@ -1030,7 +1062,6 @@ UniqueAVFrame XpuDeviceInterface::convert_tensor_to_av_frame_for_encoding_with_s
 
   // drm_format_modifier != 0 means tiled (e.g. Intel Tile-Y on BMG/Gen12+).
   const bool is_tiled = (desc.objects[0].drm_format_modifier != 0);
-
   convertRGBToNV12(
       queue,
       static_cast<const uint8_t*>(tensor.data_ptr()),

@@ -3,7 +3,6 @@
 
 #pragma once
 
-#include <unordered_map>
 #include "DeviceInterface.h"
 #include "FilterGraph.h"
 
@@ -62,19 +61,6 @@ class XpuDeviceInterface : public DeviceInterface {
   UniqueAVBufferRef ctx_;
 
   std::unique_ptr<FilterGraph> filter_graph_;
-
-  // Filter-graph imported into Level-Zero
-  struct ImportedSurface {
-    void * ptr = nullptr;
-    uint32_t offset = 0;
-    uint32_t pitch = 0;
-  };
-
-  std::unordered_map<uint32_t, ImportedSurface> imported_surfaces_;
-  void* ze_ctx_ = nullptr;
-  void* ze_dev = nullptr;
-  void release_imported_surface();
-
 
   // Used to know whether a new FilterGraphContext should
   // be created before decoding a new frame.
