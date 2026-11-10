@@ -415,20 +415,13 @@ torch::stable::Tensor AVFrameToTensor(
     const UniqueAVFrame& frame) {
   TORCH_CHECK_EQ(frame->format, AV_PIX_FMT_VAAPI);
 
-  VADisplay display = getVaDisplayFromAV(frame.get());
-  auto surface_id = static_cast<VASurfaceID>(
-    reinterpret_cast<uintptr_t>(frame->data[3]));
-  VAStatus sts = vaSyncSurface(display, surface_id);
-  TORCH_CHECK( sts == VA_STATUS_SUCCESS, 
-      "vaSyncSurface failed: ", vaErrorStr(sts));
-
   VADRMPRIMESurfaceDescriptor desc{};
 
-  sts = vaExportSurfaceHandle(
-      display,
-      surface_id,
+  VAStatus sts = vaExportSurfaceHandle(
+      getVaDisplayFromAV(frame.get()),
+      (VASurfaceID)(uintptr_t)frame->data[3],
       VA_SURFACE_ATTRIB_MEM_TYPE_DRM_PRIME_2,
-      VA_EXPORT_SURFACE_READ_ONLY | VA_EXPORT_SURFACE_SEPARATE_LAYERS,
+      VA_EXPORT_SURFACE_READ_ONLY,
       &desc);
   TORCH_CHECK(
       sts == VA_STATUS_SUCCESS,
@@ -446,13 +439,6 @@ torch::stable::Tensor AVFrameToTensor(
       desc.layers[0].num_planes == 1,
       "Expected 1 plane, got ",
       desc.layers[0].num_planes);
-
-  const uint64_t pitch = desc.layers[0].pitch[0];
-  const uint64_t offset = desc.layers[0].offset[0];
-  TORCH_CHECK(frame->width > 0 && frame->height > 0, "Invalid frame dimensions");
-  TORCH_CHECK( pitch >= static_cast<uint64_t>(frame->width) * 4, "Invalid RGBA pitch");
-  TORCH_CHECK( offset + pitch * (frame->height - 1) + frame->width * 4 <= desc.objects[0].size,
-      "RGBA surface exceeds exported buffer size");
 
   std::unique_ptr<xpuManagerCtx> context = std::make_unique<xpuManagerCtx>();
   ze_device_handle_t ze_device{};
@@ -495,13 +481,6 @@ torch::stable::Tensor AVFrameToTensor(
   shape[1] = frame->width;
   shape[2] = 4;
 
-  std::unique_ptr<int64_t, decltype(&std::free)> stride_owner(
-      static_cast<int64_t*>(std::malloc(3 * sizeof(int64_t))), &std::free);
-  TORCH_CHECK(stride_owner != nullptr, "Failed to allocate tensor strides");
-  stride_owner.get()[0] = static_cast<int64_t>(pitch);
-  stride_owner.get()[1] = 4;
-  stride_owner.get()[2] = 1;
-
   context->avFrame.reset(av_frame_alloc());
   TORCH_CHECK(context->avFrame.get(), "Failed to allocate AVFrame");
 
@@ -522,7 +501,7 @@ torch::stable::Tensor AVFrameToTensor(
   dl_dst->dl_tensor.dtype.bits = 8;
   dl_dst->dl_tensor.dtype.lanes = 1;
   dl_dst->dl_tensor.shape = shape;
-  dl_dst->dl_tensor.strides = stride_owner.release();
+  dl_dst->dl_tensor.strides = nullptr;
   dl_dst->dl_tensor.byte_offset = desc.layers[0].offset[0];
 
   // torch::stable::Tensor(AtenTensorHandle) constructor steals the ownership, so
@@ -660,22 +639,8 @@ void XpuDeviceInterface::convert_av_frame_to_frame_output_with_filter_graph(
 
   TORCH_CHECK_EQ(filteredAVFrame->format, AV_PIX_FMT_VAAPI);
 
-  sycl::queue queue = c10::xpu::getCurrentXPUStream(device_.index());
-
   torch::stable::Tensor dst_rgb4 = AVFrameToTensor(device_, filteredAVFrame);
-
-  struct QueueWaitGuard {
-    sycl::queue& queue;
-    ~QueueWaitGuard() {
-      try {
-        queue.wait();
-      } catch(...) {
-      }
-    }
-  } wait_guard{queue};
-
   torch::stable::copy_(dst, torch::stable::narrow(dst_rgb4, 2, 0, 3));
-  queue.wait_and_throw();
 }
 
 bool XpuDeviceInterface::convert_av_frame_to_frame_output_with_sycl(
